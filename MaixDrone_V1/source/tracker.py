@@ -65,9 +65,62 @@ class ObjectTracker:
                 res = input_centroids[best_match_idx][2]
                 
                 # Update thông tin
-                # [ONE EURO] Lọc Box thông minh (Nhanh khi động, Mượt khi tĩnh)
-                raw_box = [res['x'], res['y'], res['w'], res['h']]
-                filtered_box = self.filter.filter_box(oid, t_now, raw_box)
+                # --- [CHIẾN LƯỢC MỚI] Ổn định Box (EMA + Fixed Ratio + Padding) ---
+                
+                # 1. Lấy dữ liệu thô từ AI
+                raw_x, raw_y, raw_w, raw_h = res['x'], res['y'], res['w'], res['h']
+                raw_cx = raw_x + raw_w / 2
+                raw_cy = raw_y + raw_h / 2
+                
+                # 2. Chiến thuật "Vùng đệm an toàn" (Padding 5%)
+                target_h = raw_h * 1.05
+                target_w = raw_w * 1.05 # [ACCURACY] Dùng chiều rộng thật từ AI thay vì ép tỷ lệ
+                
+                # 3. Lấy trạng thái cũ
+                old_box = self.objects[oid]['box']
+                old_w, old_h = old_box[2], old_box[3]
+                old_cx = old_box[0] + old_w / 2
+                old_cy = old_box[1] + old_h / 2
+                
+                # 4. Chiến thuật "Chống sốc" (Clamp Rate of Change)
+                # Giới hạn thay đổi tối đa mỗi frame (ví dụ 10px) để tránh giật cục
+                def clamp(curr, target, max_step):
+                    delta = target - curr
+                    if delta > max_step: return curr + max_step
+                    if delta < -max_step: return curr - max_step
+                    return target
+
+                target_h = clamp(old_h, target_h, 10)
+                target_w = clamp(old_w, target_w, 10) # [ACCURACY] Chống sốc cho chiều rộng
+                target_cx = clamp(old_cx, raw_cx, 20) # Cho phép di chuyển nhanh hơn chút (20px)
+                target_cy = clamp(old_cy, raw_cy, 20)
+
+                # 5. Chiến thuật "Bộ giảm xóc" (EMA Smoothing)
+                # Công thức: Old * 0.7 + New * 0.3 (Tạo quán tính lớn)
+                alpha = 0.3
+                smooth_h = old_h * (1 - alpha) + target_h * alpha
+                smooth_w = old_w * (1 - alpha) + target_w * alpha # [ACCURACY] Smooth chiều rộng độc lập
+                smooth_cx = old_cx * (1 - alpha) + target_cx * alpha
+                smooth_cy = old_cy * (1 - alpha) + target_cy * alpha
+                
+                # Tái tạo Box hiển thị
+                filtered_box = [
+                    smooth_cx - smooth_w / 2,
+                    smooth_cy - smooth_h / 2,
+                    smooth_w,
+                    smooth_h
+                ]
+                
+                # [MỚI] Tính vận tốc (Momentum) để dự đoán cho các frame bị skip
+                # Lấy vị trí mới - vị trí cũ
+                old_box = self.objects[oid]['box']
+                
+                # [FIX] Giảm hệ số quán tính (0.4 -> 0.2) để bớt nhạy
+                # [FIX] Kẹp biên (Clamp): Không cho vận tốc vượt quá 10 pixel/frame
+                # Điều này ngăn chặn việc Box bay vèo ra ngoài nếu AI bị giật
+                raw_vel = [(n - o) * 0.2 for n, o in zip(filtered_box, old_box)]
+                self.objects[oid]['vel'] = [max(-10, min(10, v)) for v in raw_vel]
+                
                 self.objects[oid]['box'] = filtered_box
                 
                 self.objects[oid]['score'] = res['score']
@@ -96,11 +149,18 @@ class ObjectTracker:
         return self.get_display_objects()
 
     def register(self, res):
+        # [INIT] Áp dụng Padding và Ratio ngay từ đầu để Box đẹp ngay frame đầu tiên
+        raw_h = res['h'] * 1.05     # Padding 5%
+        raw_w = res['w'] * 1.05     # [ACCURACY] Dùng width thật
+        cx = res['x'] + res['w'] / 2
+        cy = res['y'] + res['h'] / 2
+        
         self.objects[self.next_id] = {
-            'box': [res['x'], res['y'], res['w'], res['h']],
+            'box': [cx - raw_w/2, cy - raw_h/2, raw_w, raw_h],
             'score': res['score'],
             'points': res.get('points', []),
-            'miss': 0
+            'miss': 0,
+            'vel': [0, 0, 0, 0] # [MỚI] Khởi tạo vận tốc = 0
         }
         self.next_id += 1
 
@@ -127,5 +187,16 @@ class ObjectTracker:
         return results
     
     def predict(self):
-        # Đơn giản là trả về vị trí cũ
+        # [MỚI] Dự đoán vị trí dựa trên quán tính (Momentum)
+        # Giúp Box di chuyển mượt mà trong các frame bị skip thay vì đứng im
+        for oid in self.objects:
+            if self.objects[oid]['miss'] == 0:
+                # Di chuyển box theo vận tốc hiện tại
+                for i in range(4):
+                    self.objects[oid]['box'][i] += self.objects[oid]['vel'][i]
+                
+                # [FIX] Tăng ma sát (0.6 -> 0.4): Phanh gấp hơn!
+                # Hộp sẽ chỉ nhích nhẹ một chút rồi dừng hẳn, thay vì trôi đi xa.
+                self.objects[oid]['vel'] = [v * 0.4 for v in self.objects[oid]['vel']]
+                
         return self.get_display_objects()

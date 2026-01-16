@@ -9,7 +9,7 @@ from source.ui import HUD
 from source.tracker import ObjectTracker # Tracker mới
 
 def main():
-    print("--- 🚁 MAIX DRONE V9: HYBRID OPTIMIZED ---")
+    print("--- 🚁 MAIX DRONE V12: SINGLE-STAGE FAST TRACKING ---")
     
     cam_mgr = CameraManager(config.CAM_WIDTH, config.CAM_HEIGHT)
     streamer = StreamServer(config.HOST, config.PORT, config.TIMEOUT)
@@ -20,8 +20,8 @@ def main():
     cam_mgr.start()
     streamer.start()
     
-    # 0 = Tốc độ tối đa (Chạy AI liên tục để bắt chuyển động nhanh nhất có thể)
-    SKIP_FRAMES = 0
+    # [CÂN BẰNG] Để Tracker làm mượt chuyển động giữa các lần AI chạy
+    SKIP_FRAMES = 2
     
     if config.ENABLE_AI:
         if not ai_engine.load():
@@ -49,8 +49,11 @@ def main():
                 # --- LOGIC HYBRID ---
                 if config.ENABLE_AI:
                     if frame_cnt % (SKIP_FRAMES + 1) == 0:
-                        # Frame chính: Chạy AI (Luôn chạy Detect để ổn định Box)
-                        img, ai_results = ai_engine.process(img)
+                        # [QUAY VỀ LOGIC CŨ] Chạy AI 1 lần duy nhất trên toàn ảnh
+                        # Nhanh, Mượt, Ổn định. Tracker sẽ lo phần làm mịn.
+                        _, ai_results = ai_engine.process(img)
+                        
+                        # Cập nhật Tracker (Tracker đã có sẵn EMA + Momentum để làm mượt)
                         current_results = tracker.update(ai_results)
                     else:
                         # Frame phụ: Tracker tự đoán

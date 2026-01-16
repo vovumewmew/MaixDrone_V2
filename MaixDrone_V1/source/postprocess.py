@@ -1,4 +1,5 @@
 import math
+import config
 
 class OneEuroFilter:
     def __init__(self, t0, x0, dx0=0.0, min_cutoff=1.0, beta=0.0, d_cutoff=1.0):
@@ -39,7 +40,9 @@ class OneEuroFilter:
         return x_hat
 
 class KinematicFilter:
-    def __init__(self):
+    def __init__(self, tolerance, deletion_multiplier):
+        self.tolerance = tolerance
+        self.deletion_multiplier = deletion_multiplier
         # Định nghĩa cây xương: Child -> Parent
         # [UPDATE] Sắp xếp lại thứ tự xử lý: Gốc -> Ngọn (Root -> Leaf)
         # Sửa điểm cha (Khuỷu/Gối) trước, rồi mới sửa điểm con (Cổ tay/Cổ chân)
@@ -62,22 +65,28 @@ class KinematicFilter:
     def update(self, kpts, box_h):
         # Copy để không sửa trực tiếp mảng input
         out_kpts = list(kpts)
-        points = {}
-        for i in range(0, len(out_kpts), 3):
-            if i + 2 >= len(out_kpts): break # [FIX] Kiểm tra an toàn
-            points[i//3] = {'x': out_kpts[i], 'y': out_kpts[i+1], 'c': out_kpts[i+2]}
 
         for child, parent in self.parents.items():
-            if child not in points or parent not in points: continue
+            # [FIX] Lấy dữ liệu trực tiếp từ out_kpts để cập nhật theo thời gian thực (Cascade)
+            if (child * 3 + 2) >= len(out_kpts) or (parent * 3 + 2) >= len(out_kpts): continue
             
-            pc = points[child]
-            pp = points[parent]
+            # Lấy độ tin cậy hiện tại
+            conf_c = out_kpts[child*3+2]
+            conf_p = out_kpts[parent*3+2]
             
-            # Chỉ xử lý nếu cả 2 điểm có độ tin cậy > 0 (đã được detect)
-            if pc['c'] <= 0 or pp['c'] <= 0: continue
+            # [DOMINO] Nếu cha bị xóa (conf=0) -> Con cũng bị xóa theo (Orphan Removal)
+            if conf_p <= 0:
+                out_kpts[child*3+2] = 0.0
+                continue
             
-            dx = pc['x'] - pp['x']
-            dy = pc['y'] - pp['y']
+            if conf_c <= 0: continue
+            
+            # Lấy toạ độ
+            cx, cy = out_kpts[child*3], out_kpts[child*3+1]
+            px, py = out_kpts[parent*3], out_kpts[parent*3+1]
+            
+            dx = cx - px
+            dy = cy - py
             curr_dist = math.sqrt(dx*dx + dy*dy)
             
             if curr_dist == 0: continue
@@ -87,32 +96,29 @@ class KinematicFilter:
             # [NẮN XƯƠNG] Tính độ dài chuẩn dựa trên chiều cao Box
             target_len = box_h * self.ratios.get(bone_id, 0.2)
             
-            # Cho phép sai số linh hoạt (30%) để phù hợp với phối cảnh 2D
-            min_len = target_len * 0.7
-            max_len = target_len * 1.3
+            # Cho phép sai số linh hoạt (từ config)
+            min_len = target_len * (1.0 - self.tolerance)
+            max_len = target_len * (1.0 + self.tolerance)
             
             scale = 1.0
             if curr_dist < min_len: scale = min_len / curr_dist
             elif curr_dist > max_len: scale = max_len / curr_dist
             
             if scale != 1.0:
-                # [FIX] Nếu sai số quá lớn (> 50% max_len) -> Điểm sai hoàn toàn -> Xóa
-                # Ví dụ: Cổ tay bị chấm xuống tận gót chân -> Xóa ngay
-                # [CÂN BẰNG] Mức 2.0: Chấp nhận tay dài gấp đôi chuẩn (tránh mất tay khi với)
-                if curr_dist > max_len * 2.0:
-                    out_kpts[child*3+2] = 0.0 # Gán conf = 0 để ẩn đi
+                # [CHIẾN THUẬT 2] The Leash Constraint (Sợi dây xích)
+                # Nếu khoảng cách > Chiều dài xương cho phép (dính tường) -> Cắt dây (Xóa điểm)
+                if curr_dist > max_len * self.deletion_multiplier:
+                    out_kpts[child*3+2] = 0.0 
                 else:
                     # Kéo điểm con về vị trí hợp lý (giữ nguyên hướng, chỉ chỉnh độ dài)
-                    pc['x'] = pp['x'] + dx * scale
-                    pc['y'] = pp['y'] + dy * scale
-                    out_kpts[child*3] = pc['x']
-                    out_kpts[child*3+1] = pc['y']
+                    out_kpts[child*3] = px + dx * scale
+                    out_kpts[child*3+1] = py + dy * scale
                     
         return out_kpts
 
 class AnatomyFilter:
-    def __init__(self):
-        pass
+    def __init__(self, min_valid_keypoints):
+        self.min_valid_keypoints = min_valid_keypoints
         
     def check(self, kpts, box):
         """
@@ -128,9 +134,8 @@ class AnatomyFilter:
             pts[i//3] = {'y': kpts[i+1], 'c': kpts[i+2]}
             
         # [MỚI] Kiểm tra số lượng điểm tin cậy
-        # Nếu cả bộ xương chỉ có < 4 điểm -> Khả năng cao là nhiễu (vết ố trên tường)
-        valid_cnt = sum(1 for p in pts.values() if p['c'] > 0.30) # [CÂN BẰNG] Hạ xuống 0.30
-        if valid_cnt < 4: 
+        valid_cnt = sum(1 for p in pts.values() if p['c'] > config.POSE_CONF_THRESHOLD)
+        if valid_cnt < self.min_valid_keypoints: 
             return False
             
         # 1. Kiểm tra Đầu - Vai (Đầu thường phải cao hơn Vai)
@@ -146,12 +151,10 @@ class AnatomyFilter:
         sum_x, sum_y, count = 0, 0, 0
         for p in pts.values():
             if p['c'] > 0.5:
-                sum_x += p['x'] # Lưu ý: pts ở trên chưa lưu x, cần sửa lại logic parse
-                sum_y += p['y'] # pts chỉ lưu y, c. Cần sửa đoạn parse ở trên
+                # sum_x += p['x'] # Logic này bị lỗi, cần sửa ở v2
+                sum_y += p['y']
                 count += 1
         
-        # (Logic này sẽ được tích hợp lại ở đoạn parse bên dưới để tối ưu)
-                
         return True
 
 class PoseFilter:
@@ -159,18 +162,27 @@ class PoseFilter:
         # Quản lý bộ lọc cho từng đối tượng
         self.filters = {} 
         
-        # [TỐC ĐỘ] Tăng Beta cực cao để Box bám dính lấy đối tượng (giảm trễ tối đa)
-        # beta=0.7: Ưu tiên tốc độ phản hồi, chấp nhận rung nhẹ để bắt kịp chuyển động
-        self.box_cfg = {'min_cutoff': 0.01, 'beta': 0.7, 'd_cutoff': 1.0}
+        # --- Nạp cấu hình từ config.py ---
+        self.kpt_conf_thresh = config.POSE_CONF_THRESHOLD
+        self.edge_conf_thresh = config.EDGE_CONF_THRESHOLD
+        self.min_valid_kpts = config.MIN_VALID_KEYPOINTS
+        kinematic_tolerance = config.KINEMATIC_TOLERANCE
+        kinematic_del_multiplier = config.KINEMATIC_DELETION_MULTIPLIER
         
-        # [TỐC ĐỘ] Tăng Beta cho Pose để điểm chấm theo kịp tốc độ của Box
-        # beta=0.1: Tăng độ nhạy để không bị tụt lại phía sau
-        self.kpt_cfg = {'min_cutoff': 0.1, 'beta': 0.1, 'd_cutoff': 1.0}
+        # [FIX TRIỆT ĐỂ] Tăng Beta lên 0.3 để bám sát người (hết lag), giữ min_cutoff 0.5 để chống rung
+        self.box_cfg = {'min_cutoff': 0.5, 'beta': 0.3, 'd_cutoff': 1.0}
         
-        # Bộ lọc Kinematic (Xương khớp)
-        self.kinematics = {} 
-        self.anatomy = AnatomyFilter()
-
+        # [FIX TRIỆT ĐỂ] Pose cũng cần nhạy hơn để tay chân không bị trễ nhịp
+        self.kpt_cfg = {'min_cutoff': 0.5, 'beta': 0.3, 'd_cutoff': 1.0}
+        
+        # --- Khởi tạo các bộ lọc phụ với cấu hình đã nạp ---
+        self.kinematics = {} # Sẽ được tạo cho mỗi ID mới
+        self.kinematic_template = KinematicFilter(
+            tolerance=kinematic_tolerance, 
+            deletion_multiplier=kinematic_del_multiplier
+        )
+        self.anatomy = AnatomyFilter(min_valid_keypoints=self.min_valid_kpts)
+        
     def filter_box(self, oid, t, box):
         if oid not in self.filters:
             self.filters[oid] = {
@@ -189,70 +201,60 @@ class PoseFilter:
         for i in range(0, len(kpts), 3):
             idx = i // 3
             x, y, conf = kpts[i], kpts[i+1], kpts[i+2]
-            
-            # [ALGO 1] Cổng Gác (Confidence Thresholding)
-            # [CÂN BẰNG] Mức 0.30: Chấp nhận điểm yếu nhưng có thực
-            # Các điểm nhiễu thường < 0.25
-            if conf < 0.30:
+
+            # [CHIẾN THUẬT 1] Center Bias Weighting (Trọng số trung tâm)
+            # Nguyên lý: Người ở giữa, rác ở rìa. Giảm tín nhiệm các điểm xa tâm.
+            if bw > 0 and bh > 0:
+                box_cx = bx + bw / 2
+                box_cy = by + bh / 2
+                # Tính khoảng cách từ điểm đến tâm Box
+                dist_from_center = math.sqrt((x - box_cx)**2 + (y - box_cy)**2)
+                max_radius = math.sqrt((bw/2)**2 + (bh/2)**2)
+                
+                # Phạt: Càng xa tâm càng trừ điểm. Tối đa trừ 0.4 (40%) độ tin cậy.
+                if max_radius > 0:
+                    penalty = (dist_from_center / max_radius) * 0.4
+                    conf -= penalty
+
+            # [ALGO 1] Cổng Gác (Confidence Thresholding) - Dùng config
+            if conf < self.kpt_conf_thresh:
                 filtered.extend([x, y, 0.0])
                 continue
 
             # [ALGO 2] Ràng buộc Hình học Hộp (Bounding Box Constraint)
-            # [PHÂN CẤP] Áp dụng margin khác nhau cho từng bộ phận
             if idx in [0, 1, 2, 3, 4, 5, 6, 11, 12]: # Đầu, Vai, Hông (Core) -> Siết chặt
-                margin_x = bw * 0.05 
-                margin_y = bh * 0.05
+                margin_x = bw * 0.03
+                margin_y = bh * 0.03
             elif idx in [7, 8, 13, 14]: # Khuỷu, Gối -> Vừa phải
-                margin_x = bw * 0.1
-                margin_y = bh * 0.1
+                margin_x = bw * 0.08
+                margin_y = bh * 0.08
             else: # Cổ tay, Cổ chân -> Nới lỏng
-                margin_x = bw * 0.2
-                margin_y = bh * 0.2
+                margin_x = bw * 0.15
+                margin_y = bh * 0.15
                 
             if x < bx - margin_x or x > bx + bw + margin_x or \
                y < by - margin_y or y > by + bh + margin_y:
-                filtered.extend([x, y, 0.0]) # Gán conf=0 để không vẽ
+                filtered.extend([x, y, 0.0])
                 continue
 
-            # [ALGO 5] Zone Constraint (Phân vùng cơ thể - Chống đầu cắm đất)
-            # Nếu người đang đứng (cao > rộng), các điểm thân trên không thể nằm dưới chân
+            # [ALGO 5] Zone Constraint (Phân vùng cơ thể)
             if bh > bw:
-                # Các điểm thân trên: 0-6 (Mũi, Mắt, Tai, Vai)
-                if idx <= 6:
-                    # Nếu nằm ở 40% dưới cùng của box -> Vô lý -> Xóa
-                    if y > by + bh * 0.6:
-                        filtered.extend([x, y, 0.0])
-                        continue
-                
-                # [ALGO 6] Wrist vs Ankle Check (Tay không thể thấp hơn chân)
-                # Nếu là Cổ tay (9, 10)
-                if idx in [9, 10]:
-                    # Nếu nằm ở 15% dưới cùng của Box (khu vực bàn chân) -> Xóa
-                    if y > by + bh * 0.85:
-                        filtered.extend([x, y, 0.0])
-                        continue
-                    
-                    # Nếu thấp hơn (Y lớn hơn) Cổ chân tương ứng (nếu Cổ chân tin cậy)
-                    # Logic này phức tạp vì cần truy xuất điểm khác, tạm thời dùng Zone 85% ở trên là đủ hiệu quả
-                    pass
+                if idx <= 6 and y > by + bh * 0.6: # Thân trên không ở dưới
+                    filtered.extend([x, y, 0.0])
+                    continue
+                if idx in [9, 10] and y > by + bh * 0.85: # Cổ tay không ở chân
+                    filtered.extend([x, y, 0.0])
+                    continue
 
-            # [ALGO 4] Edge Penalty (Phạt điểm ở mép - Chống kẹt dưới đất)
-            # Nếu điểm nằm sát mép Box (vùng 5% ngoài cùng), đòi hỏi độ tin cậy cực cao
-            # Đây là nơi thường xuất hiện các điểm "ma" do AI đoán mò ở viền ảnh
-            edge_dist_x = min(abs(x - bx), abs(bx + bw - x))
-            edge_dist_y = min(abs(y - by), abs(by + bh - y))
-            is_near_edge = (edge_dist_x < bw * 0.05) or (edge_dist_y < bh * 0.05)
-            
-            # Đặc biệt siết chặt mép dưới (chân tường) - Nơi dễ bị chấm sai nhất
-            if y > by + bh * 0.95:
-                if conf < 0.85: # Đòi hỏi tin cậy cực cao mới được vẽ ở sát đất
+            # [ALGO 4] Edge Penalty (Phạt điểm ở mép) - Dùng config
+            # [FIX] Chỉ phạt điểm ở mép DƯỚI (chân chạm biên ảnh), bỏ phạt mép trái/phải/trên
+            # Vì tay thường xuyên chạm mép trái/phải của Box.
+            if y > by + bh * 0.95: 
+                 if conf < self.edge_conf_thresh:
                     filtered.extend([x, y, 0.0])
                     continue
             
-            # Nếu sát mép mà tin cậy < 0.75 -> Xóa thẳng tay
-            if is_near_edge and conf < 0.75:
-                filtered.extend([x, y, 0.0])
-                continue
+            # Bỏ đoạn check is_near_edge cho các cạnh còn lại
 
             if idx not in self.filters[oid]['kpts']:
                 self.filters[oid]['kpts'][idx] = [
@@ -260,75 +262,73 @@ class PoseFilter:
                     OneEuroFilter(t, y, **self.kpt_cfg)
                 ]
             
-            # Chỉ lọc nếu điểm tin cậy
-            if conf > 0.0:
-                fx = self.filters[oid]['kpts'][idx][0](t, x)
-                fy = self.filters[oid]['kpts'][idx][1](t, y)
-                filtered.extend([fx, fy, conf])
-            else:
-                filtered.extend([x, y, conf])
+            fx = self.filters[oid]['kpts'][idx][0](t, x)
+            fy = self.filters[oid]['kpts'][idx][1](t, y)
+            filtered.extend([fx, fy, conf])
                 
         # --- GIAI ĐOẠN 2: KINEMATIC FILTER (Ràng buộc xương) ---
-        # Nắn chỉnh lại xương dựa trên độ dài vật lý
         if oid not in self.kinematics:
-            self.kinematics[oid] = KinematicFilter()
+            self.kinematics[oid] = self.kinematic_template
             
         kpts_kinematic = self.kinematics[oid].update(filtered, bh)
         
-        # --- GIAI ĐOẠN 3: ANATOMY CHECK (Global Check) ---
-        # Cập nhật hàm check để truyền thêm box và kiểm tra kỹ hơn
-        if not self.check_anatomy_v2(kpts_kinematic, box):
-            return [] # Nếu cấu trúc vô lý, trả về rỗng để không vẽ bậy
-        
-        return kpts_kinematic
+        # --- GIAI ĐOẠN 3: ANATOMY CHECK & REFINE (Global Check) ---
+        # Hàm này sẽ trả về danh sách các điểm đã được tinh lọc
+        refined_kpts = self.check_anatomy_v2(kpts_kinematic, box)
+
+        return refined_kpts
 
     def check_anatomy_v2(self, kpts, box):
         bx, by, bw, bh = box
-        # Tính trọng tâm các điểm tin cậy
-        sum_x, sum_y, count = 0, 0, 0
-        for i in range(0, len(kpts), 3):
-            if i + 2 >= len(kpts): break # [FIX] Safety check
-            # [ĐỒNG BỘ] Hạ xuống 0.30 để khớp với bộ lọc đầu vào (tránh việc lọc xong lại bị chặn ở đây)
-            if kpts[i+2] > 0.30:
-                sum_x += kpts[i]
-                sum_y += kpts[i+1]
-                count += 1
-        
-        if count < 4: return False # Quá ít điểm
-        
-        # [MỚI] Kiểm tra logic đứng (Vertical Consistency)
-        # Nếu Box cao hơn rộng (người đứng) -> Vai phải cao hơn Hông (Y nhỏ hơn)
-        if bh > bw * 1.1:
-            # Lấy Y trung bình của Vai (5,6) và Hông (11,12)
-            y_shoulders = []
-            # [FIX] Kiểm tra độ dài mảng trước khi truy cập index lớn
-            if len(kpts) > 6*3+2:
-                if kpts[5*3+2] > 0.30: y_shoulders.append(kpts[5*3+1])
-                if kpts[6*3+2] > 0.30: y_shoulders.append(kpts[6*3+1])
-            
-            y_hips = []
-            if len(kpts) > 12*3+2:
-                if kpts[11*3+2] > 0.30: y_hips.append(kpts[11*3+1])
-                if kpts[12*3+2] > 0.30: y_hips.append(kpts[12*3+1])
-            
-            if y_shoulders and y_hips:
-                avg_s = sum(y_shoulders)/len(y_shoulders)
-                avg_h = sum(y_hips)/len(y_hips)
-                # Nếu Vai thấp hơn Hông (Y lớn hơn) quá nhiều -> Sai tư thế hoặc detect ngược
-                if avg_s > avg_h + 10: return False
 
-        # Trọng tâm xương
-        center_x = sum_x / count
-        center_y = sum_y / count
+        # --- Giai đoạn 1: Lấy tất cả các điểm hợp lệ ban đầu và GHI NHỚ INDEX ---
+        valid_points = []
+        for i in range(0, len(kpts), 3):
+            if i + 2 >= len(kpts): break
+            # Chỉ xét các điểm có độ tin cậy ban đầu, được lọc bởi các bộ lọc trước
+            if kpts[i+2] > 0:
+                valid_points.append({'idx': i//3, 'x': kpts[i], 'y': kpts[i+1], 'c': kpts[i+2]})
+
+        if len(valid_points) < self.min_valid_kpts: return []
+
+        # [ANTI-GHOST] Kiểm tra "Xương Sống" (Core Joints)
+        # Một người thật phải có ít nhất 1 điểm thuộc thân mình (Vai hoặc Hông)
+        # Nếu chỉ có tay/chân/đầu bay lơ lửng -> Là ma (Ghost) -> Loại bỏ
+        has_core = False
+        for p in valid_points:
+            if p['idx'] in [5, 6, 11, 12]: # 5,6: Vai | 11,12: Hông
+                has_core = True
+                break
+        if not has_core: return []
+
+        # --- Giai đoạn 2: Kiểm tra Trọng tâm đơn giản (Simple Centroid Check) ---
+        # [FIX] Bỏ thuật toán lặp (Iterative) vì nó cắt mất tay chân ở xa trọng tâm.
+        # Chỉ tính trọng tâm một lần để kiểm tra xem người có bị lệch quá xa khỏi Box không.
         
-        # Tâm Box
+        sum_x = sum(p['x'] for p in valid_points)
+        sum_y = sum(p['y'] for p in valid_points)
+        centroid = (sum_x / len(valid_points), sum_y / len(valid_points))
+
+        # --- Giai đoạn 3: Kiểm tra cuối cùng và tạo list output ---
+        if len(valid_points) < self.min_valid_kpts: return []
+
+        # Kiểm tra trọng tâm của cụm điểm cuối cùng so với tâm Box
+        center_x, center_y = centroid
         box_cx = bx + bw / 2
         box_cy = by + bh / 2
         
-        # Nếu trọng tâm xương lệch quá 40% so với tâm Box -> Vô lý (Ghost)
         dist = math.sqrt((center_x - box_cx)**2 + (center_y - box_cy)**2)
-        max_dist = math.sqrt(bw**2 + bh**2) * 0.4
+        max_dist = math.sqrt(bw**2 + bh**2) * 0.3
         
-        if dist > max_dist: return False
+        if dist > max_dist: return []
         
-        return True
+        # --- TẠO OUTPUT ---
+        # Tạo một danh sách rỗng (toàn số 0) và điền các điểm hợp lệ vào đúng vị trí
+        final_kpts = [0.0] * 17 * 3
+        for p in valid_points:
+            idx = p['idx']
+            final_kpts[idx * 3] = p['x']
+            final_kpts[idx * 3 + 1] = p['y']
+            final_kpts[idx * 3 + 2] = p['c']
+            
+        return final_kpts

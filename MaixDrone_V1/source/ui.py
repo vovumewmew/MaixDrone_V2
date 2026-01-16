@@ -51,9 +51,6 @@ class HUD:
             ly = int(by) - th
             if ly < 0: ly = int(by) # Xử lý tràn màn hình
             
-            # Vẽ nền đặc (-1)
-            img.draw_rect(lx, ly, tw, th, self.C_PINK, -1)
-            
             # Vẽ chữ
             img.draw_string(lx + 1, ly + 1, text, self.C_BLACK, scale)
             
@@ -62,8 +59,9 @@ class HUD:
             joints = {}
             for i in range(0, len(points), 3):
                 px, py, conf = points[i], points[i+1], points[i+2]
-                # [CÂN BẰNG] Hạ xuống 0.35 để hiển thị các điểm tay chân vừa được cứu
-                if conf > 0.35: 
+                # [FIX] Hạ xuống 0.25 để khớp với config.POSE_CONF_THRESHOLD (0.2)
+                # Giúp hiển thị được tay/chân khi ở xa hoặc camera mờ
+                if conf > 0.25: 
                     idx = i // 3
                     
                     # Vẽ điểm màu Trắng đơn giản, giảm kích thước
@@ -73,8 +71,8 @@ class HUD:
             # Nối dây
             for i, j in self.SKELETON:
                 if i in joints and j in joints:
-                    # Chỉ vẽ dây nếu CẢ 2 ĐIỂM đều tin cậy (> 0.35)
-                    if joints[i][2] > 0.35 and joints[j][2] > 0.35:
+                    # Chỉ vẽ dây nếu CẢ 2 ĐIỂM đều tin cậy (> 0.25)
+                    if joints[i][2] > 0.25 and joints[j][2] > 0.25:
                         p1 = joints[i]
                         p2 = joints[j]
                         # Nét mảnh (1px) và màu Trắng
