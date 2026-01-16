@@ -1,0 +1,15 @@
+# Python cache (File rác khi chạy code)
+__pycache__/
+*.pyc
+
+# Cấu hình editor
+.vscode/
+.idea/
+
+# File hệ thống
+.DS_Store
+Thumbs.db
+
+# Model AI (Nếu file quá nặng >100MB thì nên bỏ qua, nếu nhẹ thì giữ lại)
+# *.cvimodel
+# *.onnx
