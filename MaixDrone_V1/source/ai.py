@@ -11,7 +11,8 @@ class AIEngine:
     def load(self):
         try:
             print("🧠 Loading YOLOv8 Pose (Single Model)...")
-            self.model = nn.YOLOv8(self.model_path)
+            # [OFFICIAL] Bật dual_buff để tăng tốc xử lý song song
+            self.model = nn.YOLOv8(self.model_path, dual_buff=True)
             return True
         except Exception as e:
             print(f"❌ Error: {e}")
@@ -24,19 +25,27 @@ class AIEngine:
         
         try:
             # --- GIAI ĐOẠN 1: TÌM NGƯỜI (GLOBAL DETECTION) ---
-            # Tính tỷ lệ scale để ảnh vừa khít khung 320x224 mà không bị méo
-            ratio = min(self.input_w / img_hd.width(), self.input_h / img_hd.height())
-            new_w = int(img_hd.width() * ratio)
-            new_h = int(img_hd.height() * ratio)
-            
-            # Resize ảnh gốc
-            img_resized = img_hd.resize(new_w, new_h)
-            
-            # Tạo ảnh nền đen 320x224 và dán ảnh đã resize vào giữa
-            img_input = image.Image(self.input_w, self.input_h) # Mặc định là đen
-            pad_w = (self.input_w - new_w) // 2
-            pad_h = (self.input_h - new_h) // 2
-            img_input.draw_image(pad_w, pad_h, img_resized)
+            # [OPTIMIZATION] Kiểm tra nếu ảnh đầu vào đã đúng kích thước Model (320x224)
+            # thì bỏ qua bước Resize và Padding để tăng tốc độ xử lý.
+            if img_hd.width() == self.input_w and img_hd.height() == self.input_h:
+                img_input = img_hd
+                ratio = 1.0
+                pad_w = 0
+                pad_h = 0
+            else:
+                # Tính tỷ lệ scale để ảnh vừa khít khung 320x224 mà không bị méo
+                ratio = min(self.input_w / img_hd.width(), self.input_h / img_hd.height())
+                new_w = int(img_hd.width() * ratio)
+                new_h = int(img_hd.height() * ratio)
+                
+                # Resize ảnh gốc
+                img_resized = img_hd.resize(new_w, new_h)
+                
+                # Tạo ảnh nền đen 320x224 và dán ảnh đã resize vào giữa
+                img_input = image.Image(self.input_w, self.input_h) # Mặc định là đen
+                pad_w = (self.input_w - new_w) // 2
+                pad_h = (self.input_h - new_h) // 2
+                img_input.draw_image(pad_w, pad_h, img_resized)
 
             # Chạy Model lần 1 để lấy Box
             objs = self.model.detect(img_input, conf_th=self.threshold, iou_th=0.45)
@@ -77,7 +86,9 @@ class AIEngine:
                     "x": bx, "y": by, "w": bw, "h": bh, # [STABLE] Vẫn trả về Box gốc ổn định
                     "score": obj.score,
                     "class_id": 0,
-                    "points": final_points # [HIGH RES] Trả về điểm chi tiết từ Crop
+                    # [OFFICIAL] Trả về nguyên bản points để dùng hàm draw_pose nếu cần
+                    # Lưu ý: final_points của ta đã map về ảnh gốc, rất tốt.
+                    "points": final_points 
                 })
 
         except Exception as e:

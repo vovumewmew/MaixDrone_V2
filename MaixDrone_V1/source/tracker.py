@@ -2,6 +2,7 @@ import math
 import time
 import config
 from source.postprocess import PoseFilter # [FIX] Import bộ lọc
+from source.gesture import PoseEstimator # [NEW] Import bộ phân tích cử chỉ
 
 class ObjectTracker:
     def __init__(self):
@@ -112,6 +113,10 @@ class ObjectTracker:
                 self.objects[oid]['quality'] = quality
                 self.objects[oid]['stability_score'] = stability # Lưu điểm L2
                 
+                # [GESTURE] Phân tích cử chỉ
+                gestures = self.objects[oid]['estimator'].update(filtered_points)
+                self.objects[oid]['gestures'] = gestures
+                
                 self.objects[oid]['score'] = res['score']
                 self.objects[oid]['miss'] = 0 # Reset biến đếm mất dấu
                 
@@ -144,7 +149,9 @@ class ObjectTracker:
             'velocity': [0.0, 0.0, 0.0, 0.0], # px/s
             'last_time': time.time(),
             'prev_raw_box': [raw_x, raw_y, raw_w, raw_h],
-            'points': res.get('points', []) # [RAW] Lưu điểm thô
+            'points': res.get('points', []), # [RAW] Lưu điểm thô
+            'estimator': PoseEstimator(), # [NEW] Khởi tạo bộ phân tích cử chỉ riêng
+            'gestures': []
         }
         self.next_id += 1
 
@@ -167,7 +174,8 @@ class ObjectTracker:
                     'box': data['box'],
                     'score': data.get('score', 0.0),
                     'points': data.get('points', []), # Truyền điểm ra UI
-                    'vector_score': data.get('vector_score', 0) # Truyền điểm số ra UI
+                    'vector_score': data.get('vector_score', 0), # Truyền điểm số ra UI
+                    'gestures': data.get('gestures', []) # Truyền cử chỉ ra UI
                 })
         return results
     

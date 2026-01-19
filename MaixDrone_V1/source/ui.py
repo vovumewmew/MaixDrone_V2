@@ -1,5 +1,6 @@
 from maix import image
 import config
+from maix import nn # Import để dùng hàm vẽ tĩnh nếu cần (tùy phiên bản SDK)
 
 class HUD:
     def __init__(self, width, height):
@@ -54,27 +55,32 @@ class HUD:
                 s_text = f"Struct: {int(v_score)}%"
                 # Vẽ ở góc dưới bên trái Box
                 img.draw_string(lx, int(by + bh) + 5, s_text, s_color, 1.0)
+                
+            # [GESTURE] Hiển thị cử chỉ nhận diện được
+            gestures = obj.get('gestures', [])
+            if gestures:
+                g_text = " | ".join(gestures)
+                img.draw_string(lx, int(by) - 40, g_text, self.C_YELLOW, 1.5)
 
             # 3. Vẽ Xương (Pose) - Raw Output
             points = obj.get('points', [])
             joints = {}
             
-            # Vẽ điểm (Joints)
-            for i in range(0, len(points), 3):
-                px, py, conf = points[i], points[i+1], points[i+2]
-                # Vẽ tất cả các điểm mà AI nhìn thấy (conf > 0)
-                if conf > 0:
-                    idx = i // 3
-                    # [UI] Giảm kích thước điểm từ 3 -> 2
-                    img.draw_circle(int(px), int(py), 2, self.C_CYAN, -1)
-                    joints[idx] = (int(px), int(py), conf)
+            # [OFFICIAL STYLE] Vẽ đơn giản, trực tiếp, không lọc cầu kỳ
+            # Nếu SDK hỗ trợ detector.draw_pose thì tốt, nhưng ở đây ta tách rời UI và AI
+            # nên ta sẽ vẽ thủ công nhưng theo phong cách "Raw" của họ.
             
-            # Vẽ đường nối (Bones)
+            # Vẽ Skeleton (Nối dây trước cho đỡ đè lên điểm)
+            for i in range(0, len(points), 3):
+                if points[i+2] > 0: # Chỉ cần conf > 0 là lưu
+                    joints[i//3] = (int(points[i]), int(points[i+1]))
+
             for i, j in self.SKELETON:
                 if i in joints and j in joints:
-                    p1 = joints[i]
-                    p2 = joints[j]
-                    # Chỉ vẽ nếu cả 2 đầu đều có độ tin cậy > 0
-                    if p1[2] > 0 and p2[2] > 0:
-                        # [UI] Giảm độ dày nét vẽ từ 2 -> 1 (tương đương 1.3px)
-                        img.draw_line(p1[0], p1[1], p2[0], p2[1], self.C_WHITE, 1)
+                    # Màu trắng, nét mảnh (1px)
+                    img.draw_line(joints[i][0], joints[i][1], joints[j][0], joints[j][1], self.C_WHITE, 1)
+
+            # Vẽ Khớp (Đè lên dây)
+            for idx, (px, py) in joints.items():
+                # Màu Cyan, bán kính 2
+                img.draw_circle(px, py, 2, self.C_CYAN, -1)
