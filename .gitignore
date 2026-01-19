@@ -13,3 +13,6 @@ Thumbs.db
 # Model AI (Nếu file quá nặng >100MB thì nên bỏ qua, nếu nhẹ thì giữ lại)
 # *.cvimodel
 # *.onnx
+
+test_pose/
+ket_qua_test/

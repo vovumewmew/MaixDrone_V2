@@ -53,18 +53,36 @@ class KinematicFilter:
             13: 11, 15: 13, # Chân trái
             14: 12, 16: 14  # Chân phải
         }
-        # [THAY ĐỔI LỚN] Sử dụng Tỷ lệ Giải phẫu Chuẩn (Anatomical Ratios)
-        # Thay vì học từ dữ liệu nhiễu, ta ép xương phải đúng tỷ lệ so với chiều cao Box
-        self.ratios = {
-            (7, 5): 0.16, (9, 7): 0.14,   # Cánh tay trên/dưới (~15% chiều cao)
+        # [FIX 3] Tỷ lệ giải phẫu cơ bản (Base Ratios)
+        # Sẽ được nhân với chiều cao tham chiếu (Reference Height)
+        self.base_ratios = {
+            (7, 5): 0.16, (9, 7): 0.14,     # Tay
             (8, 6): 0.16, (10, 8): 0.14,
-            (13, 11): 0.23, (15, 13): 0.20, # Đùi/Cẳng chân (~22% chiều cao)
+            (13, 11): 0.23, (15, 13): 0.20, # Chân
             (14, 12): 0.23, (16, 14): 0.20
         }
 
     def update(self, kpts, box_h):
         # Copy để không sửa trực tiếp mảng input
         out_kpts = list(kpts)
+
+        # [FIX 3] Tính chiều cao tham chiếu ĐỘNG (Dynamic Reference Height)
+        # Ưu tiên dùng chiều dài thân mình (Torso Length) * 3.0 để ước lượng chiều cao thật
+        # Nếu không thấy thân mình, mới dùng chiều cao Box.
+        ref_height = box_h
+        
+        # Lấy toạ độ Vai và Hông (nếu có)
+        # 5,6: Vai | 11,12: Hông
+        if (out_kpts[5*3+2] > 0 and out_kpts[6*3+2] > 0 and 
+            out_kpts[11*3+2] > 0 and out_kpts[12*3+2] > 0):
+            
+            shoulder_y = (out_kpts[5*3+1] + out_kpts[6*3+1]) / 2
+            hip_y = (out_kpts[11*3+1] + out_kpts[12*3+1]) / 2
+            torso_len = abs(hip_y - shoulder_y)
+            
+            if torso_len > 0:
+                # Thân mình thường chiếm 1/3 chiều cao cơ thể -> Nhân 3 để ra chiều cao chuẩn
+                ref_height = torso_len * 3.0
 
         for child, parent in self.parents.items():
             # [FIX] Lấy dữ liệu trực tiếp từ out_kpts để cập nhật theo thời gian thực (Cascade)
@@ -94,7 +112,8 @@ class KinematicFilter:
             bone_id = (child, parent)
             
             # [NẮN XƯƠNG] Tính độ dài chuẩn dựa trên chiều cao Box
-            target_len = box_h * self.ratios.get(bone_id, 0.2)
+            # Dùng ref_height thay vì box_h cố định
+            target_len = ref_height * self.base_ratios.get(bone_id, 0.2)
             
             # Cho phép sai số linh hoạt (từ config)
             min_len = target_len * (1.0 - self.tolerance)
@@ -157,6 +176,210 @@ class AnatomyFilter:
         
         return True
 
+class PoseQualityScorer:
+    def __init__(self):
+        self.weights = {
+            'structural': 0.3,     # Cấu trúc cơ thể hợp lý
+            'symmetry': 0.2,       # Tính đối xứng
+            'kinematic': 0.25,     # Tuân thủ động học
+            'temporal': 0.15,      # Ổn định theo thời gian
+            'coverage': 0.1        # Độ phủ keypoints
+        }
+    
+    def score_pose(self, kpts, box, prev_kpts=None):
+        """Tính điểm chất lượng tổng thể của pose (0-1)"""
+        if not kpts:
+            return {'total': 0.0, 'grade': 'INVALID', 'breakdown': {}}
+            
+        scores = {}
+        
+        # 1. Structural Score - Cấu trúc cơ thể
+        scores['structural'] = self._structural_score(kpts, box)
+        
+        # 2. Symmetry Score - Đối xứng trái/phải
+        scores['symmetry'] = self._symmetry_score(kpts)
+        
+        # 3. Kinematic Score - Độ dài xương hợp lý
+        scores['kinematic'] = self._kinematic_score(kpts, box[3])  # box height
+        
+        # 4. Temporal Score - Ổn định theo thời gian
+        if prev_kpts:
+            scores['temporal'] = self._temporal_score(kpts, prev_kpts)
+        else:
+            scores['temporal'] = 0.7  # Default nếu không có history
+            
+        # 5. Coverage Score - Số lượng keypoints phát hiện được
+        scores['coverage'] = self._coverage_score(kpts)
+        
+        # Tính tổng trọng số
+        total_score = sum(scores[key] * self.weights[key] for key in scores)
+        
+        return {
+            'total': total_score,
+            'breakdown': scores,
+            'grade': self._assign_grade(total_score)
+        }
+    
+    def _structural_score(self, kpts, box):
+        """Điểm dựa trên cấu trúc cơ thể hợp lý"""
+        bx, by, bw, bh = box
+        pts = {}
+        for i in range(0, len(kpts), 3):
+            if i + 2 < len(kpts) and kpts[i+2] > 0.1:
+                pts[i//3] = {'x': kpts[i], 'y': kpts[i+1], 'c': kpts[i+2]}
+        
+        score = 0.0
+        # Quy tắc 1: Đầu phải ở trên vai
+        if 0 in pts and 5 in pts and 6 in pts:
+            nose_y = pts[0]['y']
+            shoulder_y = min(pts[5]['y'], pts[6]['y'])
+            if nose_y < shoulder_y - 10: score += 0.2
+        
+        # Quy tắc 2: Hông phải dưới vai
+        if 5 in pts and 6 in pts and 11 in pts and 12 in pts:
+            shoulder_y = min(pts[5]['y'], pts[6]['y'])
+            hip_y = max(pts[11]['y'], pts[12]['y'])
+            if hip_y > shoulder_y + 20: score += 0.2
+        
+        # Quy tắc 3: Trọng tâm keypoints nằm trong bounding box
+        if len(pts) > 3:
+            center_x = sum(p['x'] for p in pts.values()) / len(pts)
+            center_y = sum(p['y'] for p in pts.values()) / len(pts)
+            if (bx <= center_x <= bx + bw and by <= center_y <= by + bh):
+                score += 0.3
+            else: score -= 0.2
+        
+        # Quy tắc 4: Không có keypoints nào bay quá xa
+        outliers = 0
+        for p in pts.values():
+            dist_to_center = math.sqrt((p['x'] - bx - bw/2)**2 + (p['y'] - by - bh/2)**2)
+            max_allowed = math.sqrt(bw**2 + bh**2) * 0.8
+            if dist_to_center > max_allowed: outliers += 1
+        
+        if outliers == 0: score += 0.3
+        elif outliers <= 2: score += 0.1
+        else: score -= 0.2
+        
+        return max(0.0, min(1.0, score))
+    
+    def _symmetry_score(self, kpts):
+        left_right_pairs = [(5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16)]
+        valid_pairs = 0
+        symmetry_score = 0.0
+        for left, right in left_right_pairs:
+            idx_l, idx_r = left * 3, right * 3
+            if (idx_l + 2 < len(kpts) and idx_r + 2 < len(kpts) and
+                kpts[idx_l + 2] > 0.1 and kpts[idx_r + 2] > 0.1):
+                y_l, y_r = kpts[idx_l + 1], kpts[idx_r + 1]
+                height_diff = abs(y_l - y_r)
+                pair_score = max(0, 1.0 - height_diff / 50)
+                symmetry_score += pair_score
+                valid_pairs += 1
+        return symmetry_score / valid_pairs if valid_pairs > 0 else 0.5
+    
+    def _kinematic_score(self, kpts, box_height):
+        bone_ratios = {
+            (5, 7): 0.16, (7, 9): 0.14, (6, 8): 0.16, (8, 10): 0.14,
+            (11, 13): 0.23, (13, 15): 0.20, (12, 14): 0.23, (14, 16): 0.20
+        }
+        valid_bones = 0
+        kinematic_score = 0.0
+        for (j1, j2), target_ratio in bone_ratios.items():
+            idx1, idx2 = j1 * 3, j2 * 3
+            if (idx1 + 2 < len(kpts) and idx2 + 2 < len(kpts) and
+                kpts[idx1 + 2] > 0.3 and kpts[idx2 + 2] > 0.3):
+                x1, y1 = kpts[idx1], kpts[idx1 + 1]
+                x2, y2 = kpts[idx2], kpts[idx2 + 1]
+                bone_length = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                ideal_length = box_height * target_ratio
+                ratio = bone_length / ideal_length if ideal_length > 0 else 1
+                if 0.5 <= ratio <= 2.0:
+                    bone_score = 1.0 - abs(ratio - 1.0)
+                    kinematic_score += bone_score
+                    valid_bones += 1
+        return kinematic_score / valid_bones if valid_bones > 0 else 0.5
+    
+    def _temporal_score(self, curr_kpts, prev_kpts):
+        if len(curr_kpts) != len(prev_kpts): return 0.5
+        total_movement = 0
+        valid_points = 0
+        for i in range(0, len(curr_kpts), 3):
+            if i + 2 >= len(curr_kpts) or i + 2 >= len(prev_kpts): continue
+            if curr_kpts[i+2] > 0.1 and prev_kpts[i+2] > 0.1:
+                dx = curr_kpts[i] - prev_kpts[i]
+                dy = curr_kpts[i+1] - prev_kpts[i+1]
+                total_movement += math.sqrt(dx*dx + dy*dy)
+                valid_points += 1
+        if valid_points == 0: return 0.5
+        avg_movement = total_movement / valid_points
+        if avg_movement < 5: return 1.0
+        elif avg_movement < 20: return 0.8
+        elif avg_movement < 50: return 0.5
+        else: return 0.2
+    
+    def _coverage_score(self, kpts):
+        total_points = 17
+        detected_points = sum(1 for i in range(0, len(kpts), 3) if kpts[i+2] > 0.1)
+        coverage_ratio = detected_points / total_points
+        if coverage_ratio >= 0.8: return 1.0
+        elif coverage_ratio >= 0.6: return 0.8
+        elif coverage_ratio >= 0.4: return 0.6
+        elif coverage_ratio >= 0.2: return 0.4
+        else: return 0.2
+    
+    def _assign_grade(self, score):
+        if score >= 0.8: return "EXCELLENT"
+        elif score >= 0.6: return "GOOD"
+        elif score >= 0.4: return "FAIR"
+        elif score >= 0.2: return "POOR"
+        else: return "INVALID"
+
+class VectorScorer:
+    """
+    Thuật toán so sánh cấu trúc hình học dựa trên Cosine Similarity của các vector xương.
+    (Chuyển thể từ code Python/Numpy sang Pure Python cho MaixCam)
+    """
+    def __init__(self):
+        # Định nghĩa các cặp nối xương chuẩn COCO (17 điểm)
+        self.SKELETON_EDGES = [
+            (15, 13), (13, 11), (16, 14), (14, 12), (11, 12), (5, 11), (6, 12), (5, 6),
+            (5, 7), (7, 9), (6, 8), (8, 10), (1, 2), (0, 1), (0, 2), (1, 3), (2, 4)
+        ]
+
+    def compute(self, curr_kpts, target_kpts):
+        """
+        Tính điểm tương đồng giữa pose hiện tại và pose mục tiêu (frame trước).
+        Output: 0.0 -> 100.0
+        """
+        if not curr_kpts or not target_kpts: return 0.0
+        
+        scores = []
+        for u, v in self.SKELETON_EDGES:
+            # Kiểm tra index an toàn
+            if (u*3+2 >= len(curr_kpts) or v*3+2 >= len(curr_kpts) or
+                u*3+2 >= len(target_kpts) or v*3+2 >= len(target_kpts)): continue
+
+            # Chỉ tính nếu cả 2 đầu xương đều được detect ở cả 2 frame
+            if (curr_kpts[u*3+2] > 0 and curr_kpts[v*3+2] > 0 and
+                target_kpts[u*3+2] > 0 and target_kpts[v*3+2] > 0):
+                
+                # Vector U (Current)
+                ux, uy = curr_kpts[v*3] - curr_kpts[u*3], curr_kpts[v*3+1] - curr_kpts[u*3+1]
+                # Vector V (Target/Previous)
+                vx, vy = target_kpts[v*3] - target_kpts[u*3], target_kpts[v*3+1] - target_kpts[u*3+1]
+                
+                # Dot product & Norm
+                dot = ux*vx + uy*vy
+                norm_u = math.sqrt(ux*ux + uy*uy)
+                norm_v = math.sqrt(vx*vx + vy*vy)
+                
+                if norm_u > 0 and norm_v > 0:
+                    sim = dot / (norm_u * norm_v)
+                    scores.append(sim)
+        
+        # Trả về trung bình cộng * 100
+        return (sum(scores) / len(scores)) * 100 if scores else 0.0
+
 class PoseFilter:
     def __init__(self):
         # Quản lý bộ lọc cho từng đối tượng
@@ -166,14 +389,17 @@ class PoseFilter:
         self.kpt_conf_thresh = config.POSE_CONF_THRESHOLD
         self.edge_conf_thresh = config.EDGE_CONF_THRESHOLD
         self.min_valid_kpts = config.MIN_VALID_KEYPOINTS
+        self.max_jump_ratio = config.MAX_KPT_JUMP_RATIO # [MỚI]
         kinematic_tolerance = config.KINEMATIC_TOLERANCE
         kinematic_del_multiplier = config.KINEMATIC_DELETION_MULTIPLIER
         
-        # [FIX TRIỆT ĐỂ] Tăng Beta lên 0.3 để bám sát người (hết lag), giữ min_cutoff 0.5 để chống rung
-        self.box_cfg = {'min_cutoff': 0.5, 'beta': 0.3, 'd_cutoff': 1.0}
+        # [TUNING] Tinh chỉnh bộ lọc cho Box
+        # [RESET] Cấu hình chuẩn, cân bằng
+        self.box_cfg = {'min_cutoff': 0.1, 'beta': 0.1, 'd_cutoff': 1.0}
         
-        # [FIX TRIỆT ĐỂ] Pose cũng cần nhạy hơn để tay chân không bị trễ nhịp
-        self.kpt_cfg = {'min_cutoff': 0.5, 'beta': 0.3, 'd_cutoff': 1.0}
+        # [TUNING] Tinh chỉnh bộ lọc cho Keypoints
+        # [BALANCED] Beta = 0.05: Đủ để chống rung nhưng vẫn bám theo tay
+        self.kpt_cfg = {'min_cutoff': 0.5, 'beta': 0.05, 'd_cutoff': 1.0}
         
         # --- Khởi tạo các bộ lọc phụ với cấu hình đã nạp ---
         self.kinematics = {} # Sẽ được tạo cho mỗi ID mới
@@ -182,6 +408,13 @@ class PoseFilter:
             deletion_multiplier=kinematic_del_multiplier
         )
         self.anatomy = AnatomyFilter(min_valid_keypoints=self.min_valid_kpts)
+        
+        # [MỚI] Bộ đánh giá chất lượng
+        self.quality_scorer = PoseQualityScorer()
+        self.pose_history = {} # Lưu lịch sử pose để tính điểm Temporal
+        
+        # [MỚI] Bộ đánh giá Vector (Geometry Structure)
+        self.vector_scorer = VectorScorer()
         
     def filter_box(self, oid, t, box):
         if oid not in self.filters:
@@ -193,7 +426,10 @@ class PoseFilter:
         return [f(t, x) for f, x in zip(self.filters[oid]['box'], box)]
 
     def filter_kpts(self, oid, t, kpts, box):
-        if oid not in self.filters: return kpts # Chưa init thì trả về gốc
+        if oid not in self.filters: 
+            self.filters[oid] = {'box': [], 'kpts': {}}
+            # Trả về raw và quality rỗng cho frame đầu tiên để tránh lỗi unpack
+            return kpts, {'total': 0.0, 'grade': 'INVALID', 'breakdown': {}}
         
         bx, by, bw, bh = box
         
@@ -202,59 +438,38 @@ class PoseFilter:
             idx = i // 3
             x, y, conf = kpts[i], kpts[i+1], kpts[i+2]
 
-            # [CHIẾN THUẬT 1] Center Bias Weighting (Trọng số trung tâm)
-            # Nguyên lý: Người ở giữa, rác ở rìa. Giảm tín nhiệm các điểm xa tâm.
-            if bw > 0 and bh > 0:
-                box_cx = bx + bw / 2
-                box_cy = by + bh / 2
-                # Tính khoảng cách từ điểm đến tâm Box
-                dist_from_center = math.sqrt((x - box_cx)**2 + (y - box_cy)**2)
-                max_radius = math.sqrt((bw/2)**2 + (bh/2)**2)
-                
-                # Phạt: Càng xa tâm càng trừ điểm. Tối đa trừ 0.4 (40%) độ tin cậy.
-                if max_radius > 0:
-                    penalty = (dist_from_center / max_radius) * 0.4
-                    conf -= penalty
-
-            # [ALGO 1] Cổng Gác (Confidence Thresholding) - Dùng config
-            if conf < self.kpt_conf_thresh:
+            # [FIX] Gỡ bỏ Center Bias vì nó làm mất tay khi dang rộng.
+            
+            # [LỚP 1] Dynamic Thresholding -> ĐÃ GỠ BỎ
+            # Sử dụng ngưỡng cố định thấp từ config để đảm bảo hiện đủ 17 điểm
+            required_conf = self.kpt_conf_thresh
+            
+            # Nếu độ tin cậy thấp hơn mức yêu cầu -> Bỏ
+            if conf < required_conf:
                 filtered.extend([x, y, 0.0])
                 continue
 
             # [ALGO 2] Ràng buộc Hình học Hộp (Bounding Box Constraint)
-            if idx in [0, 1, 2, 3, 4, 5, 6, 11, 12]: # Đầu, Vai, Hông (Core) -> Siết chặt
-                margin_x = bw * 0.03
-                margin_y = bh * 0.03
-            elif idx in [7, 8, 13, 14]: # Khuỷu, Gối -> Vừa phải
-                margin_x = bw * 0.08
-                margin_y = bh * 0.08
-            else: # Cổ tay, Cổ chân -> Nới lỏng
-                margin_x = bw * 0.15
-                margin_y = bh * 0.15
+            # [ACTIVE] Bật lại để loại bỏ điểm ma nằm xa Box
+            if idx in [0, 1, 2, 3, 4, 5, 6, 11, 12]: # Core -> Siết chặt
+                margin_x = bw * 0.1
+                margin_y = bh * 0.1
+            elif idx in [7, 8, 13, 14]: # Khuỷu/Gối -> Vừa phải
+                margin_x = bw * 0.3 
+                margin_y = bh * 0.3
+            else: # Cổ tay/chân -> Nới lỏng (cho phép vươn ra ngoài 50% chiều rộng box)
+                margin_x = bw * 0.5 
+                margin_y = bh * 0.5
                 
             if x < bx - margin_x or x > bx + bw + margin_x or \
                y < by - margin_y or y > by + bh + margin_y:
                 filtered.extend([x, y, 0.0])
                 continue
 
-            # [ALGO 5] Zone Constraint (Phân vùng cơ thể)
-            if bh > bw:
-                if idx <= 6 and y > by + bh * 0.6: # Thân trên không ở dưới
-                    filtered.extend([x, y, 0.0])
-                    continue
-                if idx in [9, 10] and y > by + bh * 0.85: # Cổ tay không ở chân
-                    filtered.extend([x, y, 0.0])
-                    continue
-
-            # [ALGO 4] Edge Penalty (Phạt điểm ở mép) - Dùng config
-            # [FIX] Chỉ phạt điểm ở mép DƯỚI (chân chạm biên ảnh), bỏ phạt mép trái/phải/trên
-            # Vì tay thường xuyên chạm mép trái/phải của Box.
-            if y > by + bh * 0.95: 
-                 if conf < self.edge_conf_thresh:
-                    filtered.extend([x, y, 0.0])
-                    continue
-            
-            # Bỏ đoạn check is_near_edge cho các cạnh còn lại
+            # [RAW MODE] Tắt toàn bộ các bộ lọc logic (Zone, Edge, Teleport)
+            # Để đảm bảo mọi điểm AI nhìn thấy đều được hiển thị
+            if idx in self.filters[oid]['kpts']:
+                pass 
 
             if idx not in self.filters[oid]['kpts']:
                 self.filters[oid]['kpts'][idx] = [
@@ -270,13 +485,23 @@ class PoseFilter:
         if oid not in self.kinematics:
             self.kinematics[oid] = self.kinematic_template
             
+        # [ACTIVE] Bật lại Kinematic để loại bỏ các điểm nối sai (tay dài bất thường)
         kpts_kinematic = self.kinematics[oid].update(filtered, bh)
         
         # --- GIAI ĐOẠN 3: ANATOMY CHECK & REFINE (Global Check) ---
         # Hàm này sẽ trả về danh sách các điểm đã được tinh lọc
-        refined_kpts = self.check_anatomy_v2(kpts_kinematic, box)
-
-        return refined_kpts
+        # [BYPASS] Tạm tắt kiểm tra giải phẫu để tránh trả về danh sách rỗng nếu ít điểm
+        refined_kpts = kpts_kinematic
+        
+        # [MỚI] Tính điểm chất lượng (Quality Score)
+        prev_kpts = self.pose_history.get(oid, None)
+        quality = self.quality_scorer.score_pose(refined_kpts, box, prev_kpts)
+        
+        # Lưu lại lịch sử cho frame sau
+        if refined_kpts:
+            self.pose_history[oid] = refined_kpts
+            
+        return refined_kpts, quality
 
     def check_anatomy_v2(self, kpts, box):
         bx, by, bw, bh = box

@@ -1,6 +1,7 @@
 import math
 import time
-from source.postprocess import PoseFilter
+import config
+from source.postprocess import PoseFilter # [FIX] Import bộ lọc
 
 class ObjectTracker:
     def __init__(self):
@@ -10,7 +11,7 @@ class ObjectTracker:
         self.next_id = 1
         self.max_miss_count = 10  # Mất dấu 10 frame mới xóa
         self.dist_threshold = 100 # Khoảng cách tối đa để coi là cùng 1 người (pixel)
-        self.filter = PoseFilter() # Sử dụng One Euro Filter
+        self.filter = PoseFilter() # [FIX] Khởi tạo bộ lọc
 
     def update(self, ai_results):
         """
@@ -38,13 +39,19 @@ class ObjectTracker:
         object_centroids = []
         for oid in object_ids:
             box = self.objects[oid]['box']
-            cx = box[0] + box[2] / 2
-            cy = box[1] + box[3] / 2
-            object_centroids.append((cx, cy))
+            vel = self.objects[oid].get('velocity', [0,0,0,0])
+            
+            # [FIX 1] Predictive Matching (Bắt cặp dựa trên Dự đoán)
+            # Dự đoán vị trí hiện tại dựa trên vận tốc, giúp tránh nhầm lẫn khi 2 người đi qua nhau
+            dt_match = t_now - self.objects[oid].get('last_time', t_now)
+            if dt_match > 1.0: dt_match = 0 # Safety check
+            
+            pred_cx = box[0] + box[2]/2 + vel[0] * dt_match
+            pred_cy = box[1] + box[3]/2 + vel[1] * dt_match
+            object_centroids.append((pred_cx, pred_cy))
 
         # Đánh dấu đã dùng
         used_input = [False] * len(input_centroids)
-        used_object = [False] * len(object_ids)
 
         # Duyệt qua từng object cũ, tìm input mới gần nhất
         for i, (old_cx, old_cy) in enumerate(object_centroids):
@@ -64,76 +71,51 @@ class ObjectTracker:
                 oid = object_ids[i]
                 res = input_centroids[best_match_idx][2]
                 
-                # Update thông tin
-                # --- [CHIẾN LƯỢC MỚI] Ổn định Box (EMA + Fixed Ratio + Padding) ---
-                
-                # 1. Lấy dữ liệu thô từ AI
-                raw_x, raw_y, raw_w, raw_h = res['x'], res['y'], res['w'], res['h']
-                raw_cx = raw_x + raw_w / 2
-                raw_cy = raw_y + raw_h / 2
-                
-                # 2. Chiến thuật "Vùng đệm an toàn" (Padding 5%)
-                target_h = raw_h * 1.05
-                target_w = raw_w * 1.05 # [ACCURACY] Dùng chiều rộng thật từ AI thay vì ép tỷ lệ
-                
-                # 3. Lấy trạng thái cũ
-                old_box = self.objects[oid]['box']
-                old_w, old_h = old_box[2], old_box[3]
-                old_cx = old_box[0] + old_w / 2
-                old_cy = old_box[1] + old_h / 2
-                
-                # 4. Chiến thuật "Chống sốc" (Clamp Rate of Change)
-                # Giới hạn thay đổi tối đa mỗi frame (ví dụ 10px) để tránh giật cục
-                def clamp(curr, target, max_step):
-                    delta = target - curr
-                    if delta > max_step: return curr + max_step
-                    if delta < -max_step: return curr - max_step
-                    return target
+                raw_box = [res['x'], res['y'], res['w'], res['h']]
+                old_data = self.objects[oid]
+                old_box = old_data['box']
 
-                target_h = clamp(old_h, target_h, 10)
-                target_w = clamp(old_w, target_w, 10) # [ACCURACY] Chống sốc cho chiều rộng
-                target_cx = clamp(old_cx, raw_cx, 20) # Cho phép di chuyển nhanh hơn chút (20px)
-                target_cy = clamp(old_cy, raw_cy, 20)
+                # [EMA SMOOTHING] Bật lại làm mượt để chống rung (Jitter)
+                # [TUNING] Tăng Alpha lên 0.6 để Box bám nhanh hơn (giảm độ trễ)
+                alpha = 0.6
+                smooth_box = [r * alpha + o * (1 - alpha) for r, o in zip(raw_box, old_box)]
+                
+                self.objects[oid]['box'] = smooth_box
+                self.objects[oid]['velocity'] = [0,0,0,0] # Reset velocity, không dùng nữa
+                self.objects[oid]['prev_raw_box'] = raw_box
+                self.objects[oid]['last_time'] = t_now
+                
+                # [FILTERING] Chỉ lọc điểm (Points) để chống rung
+                raw_points = res.get('points', [])
+                old_points = self.objects[oid].get('points', [])
+                
+                # [L2 ALGORITHM] Tính điểm ổn định (Stability Score) bằng Euclid Distance
+                # Nếu tổng khoảng cách di chuyển của các khớp nhỏ -> Điểm cao (Ổn định)
+                l2_sum = 0
+                valid_cnt = 0
+                if old_points and raw_points:
+                    for i in range(0, len(raw_points), 3):
+                        # Chỉ tính nếu điểm đó tồn tại ở cả 2 frame
+                        if i+2 < len(old_points) and raw_points[i+2] > 0 and old_points[i+2] > 0:
+                            dx = raw_points[i] - old_points[i]
+                            dy = raw_points[i+1] - old_points[i+1]
+                            l2_sum += math.sqrt(dx*dx + dy*dy) # Công thức Euclid
+                            valid_cnt += 1
+                
+                # Quy đổi ra điểm số (0-100). Di chuyển trung bình > 5px là mất điểm.
+                avg_move = l2_sum / valid_cnt if valid_cnt > 0 else 10
+                stability = max(0, min(100, 100 - avg_move * 10))
+                
+                filtered_points, quality = self.filter.filter_kpts(oid, t_now, raw_points, raw_box)
 
-                # 5. Chiến thuật "Bộ giảm xóc" (EMA Smoothing)
-                # Công thức: Old * 0.7 + New * 0.3 (Tạo quán tính lớn)
-                alpha = 0.3
-                smooth_h = old_h * (1 - alpha) + target_h * alpha
-                smooth_w = old_w * (1 - alpha) + target_w * alpha # [ACCURACY] Smooth chiều rộng độc lập
-                smooth_cx = old_cx * (1 - alpha) + target_cx * alpha
-                smooth_cy = old_cy * (1 - alpha) + target_cy * alpha
-                
-                # Tái tạo Box hiển thị
-                filtered_box = [
-                    smooth_cx - smooth_w / 2,
-                    smooth_cy - smooth_h / 2,
-                    smooth_w,
-                    smooth_h
-                ]
-                
-                # [MỚI] Tính vận tốc (Momentum) để dự đoán cho các frame bị skip
-                # Lấy vị trí mới - vị trí cũ
-                old_box = self.objects[oid]['box']
-                
-                # [FIX] Giảm hệ số quán tính (0.4 -> 0.2) để bớt nhạy
-                # [FIX] Kẹp biên (Clamp): Không cho vận tốc vượt quá 10 pixel/frame
-                # Điều này ngăn chặn việc Box bay vèo ra ngoài nếu AI bị giật
-                raw_vel = [(n - o) * 0.2 for n, o in zip(filtered_box, old_box)]
-                self.objects[oid]['vel'] = [max(-10, min(10, v)) for v in raw_vel]
-                
-                self.objects[oid]['box'] = filtered_box
+                self.objects[oid]['points'] = filtered_points
+                self.objects[oid]['quality'] = quality
+                self.objects[oid]['stability_score'] = stability # Lưu điểm L2
                 
                 self.objects[oid]['score'] = res['score']
-                
-                # [KÍCH HOẠT LẠI] Lọc Pose để đảm bảo điểm chấm chính xác, mượt mà
-                raw_points = res.get('points', [])
-                self.objects[oid]['points'] = self.filter.filter_kpts(oid, t_now, raw_points, filtered_box)
-                # self.objects[oid]['points'] = raw_points 
-                
                 self.objects[oid]['miss'] = 0 # Reset biến đếm mất dấu
                 
                 used_input[best_match_idx] = True
-                used_object[i] = True
             else:
                 # Không tìm thấy input mới cho object này -> Tăng biến mất dấu
                 self.objects[object_ids[i]]['miss'] += 1
@@ -150,17 +132,19 @@ class ObjectTracker:
 
     def register(self, res):
         # [INIT] Áp dụng Padding và Ratio ngay từ đầu để Box đẹp ngay frame đầu tiên
-        raw_h = res['h'] * 1.05     # Padding 5%
-        raw_w = res['w'] * 1.05     # [ACCURACY] Dùng width thật
-        cx = res['x'] + res['w'] / 2
-        cy = res['y'] + res['h'] / 2
+        raw_h = res['h']
+        raw_w = res['w']
+        raw_x = res['x']
+        raw_y = res['y']
         
         self.objects[self.next_id] = {
-            'box': [cx - raw_w/2, cy - raw_h/2, raw_w, raw_h],
+            'box': [raw_x, raw_y, raw_w, raw_h],
             'score': res['score'],
-            'points': res.get('points', []),
             'miss': 0,
-            'vel': [0, 0, 0, 0] # [MỚI] Khởi tạo vận tốc = 0
+            'velocity': [0.0, 0.0, 0.0, 0.0], # px/s
+            'last_time': time.time(),
+            'prev_raw_box': [raw_x, raw_y, raw_w, raw_h],
+            'points': res.get('points', []) # [RAW] Lưu điểm thô
         }
         self.next_id += 1
 
@@ -182,21 +166,15 @@ class ObjectTracker:
                     'id': oid,
                     'box': data['box'],
                     'score': data.get('score', 0.0),
-                    'points': data.get('points', [])
+                    'points': data.get('points', []), # Truyền điểm ra UI
+                    'vector_score': data.get('vector_score', 0) # Truyền điểm số ra UI
                 })
         return results
     
     def predict(self):
-        # [MỚI] Dự đoán vị trí dựa trên quán tính (Momentum)
-        # Giúp Box di chuyển mượt mà trong các frame bị skip thay vì đứng im
-        for oid in self.objects:
-            if self.objects[oid]['miss'] == 0:
-                # Di chuyển box theo vận tốc hiện tại
-                for i in range(4):
-                    self.objects[oid]['box'][i] += self.objects[oid]['vel'][i]
-                
-                # [FIX] Tăng ma sát (0.6 -> 0.4): Phanh gấp hơn!
-                # Hộp sẽ chỉ nhích nhẹ một chút rồi dừng hẳn, thay vì trôi đi xa.
-                self.objects[oid]['vel'] = [v * 0.4 for v in self.objects[oid]['vel']]
-                
+        # [PREDICTION] Dự đoán vị trí trong các frame bị skip
+        # Giúp tăng FPS (bằng cách tăng SKIP_FRAMES) mà hình ảnh vẫn mượt
+        
+        # [TEST] Tắt tính toán dự đoán (Zero Order Hold) để kiểm tra độ ổn định
+        # Box sẽ đứng yên trong các frame bị skip
         return self.get_display_objects()

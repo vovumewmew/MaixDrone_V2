@@ -1,1 +1,2 @@
 ssh root@10.89.70.1
+scp -r root@10.89.70.1:/root/MaixDrone_V1/output_images C:\Users\vovu0\OneDrive\Du_An_Maix_V2\ket_qua_test

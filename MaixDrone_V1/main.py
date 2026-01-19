@@ -21,7 +21,7 @@ def main():
     streamer.start()
     
     # [CÂN BẰNG] Để Tracker làm mượt chuyển động giữa các lần AI chạy
-    SKIP_FRAMES = 2
+    SKIP_FRAMES = 3 # [BOOST] Tăng lên 3 để đạt mục tiêu 25-30 FPS
     
     if config.ENABLE_AI:
         if not ai_engine.load():
