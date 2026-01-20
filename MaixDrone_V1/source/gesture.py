@@ -58,7 +58,7 @@ class PoseEstimator:
             
             spine_angle = abs(angle(UP, spine))
             
-            body_pose = "Unknown"
+            body_pose = "Khong Ro"
             if spine_angle < 30: # Upright
                 # Check Legs for Sitting vs Standing
                 # Thigh Vector (Hip to Knee) vs Spine
@@ -73,15 +73,15 @@ class PoseEstimator:
                 r_leg_ang = abs(angle(spine, r_thigh))
                 
                 if l_leg_ang > 150 or r_leg_ang > 150:
-                    body_pose = "Standing"
+                    body_pose = "Dung"
                 elif l_leg_ang < 120 or r_leg_ang < 120:
-                    body_pose = "Sitting"
+                    body_pose = "Ngoi"
                 else:
-                    body_pose = "Upright"
+                    body_pose = "Dung"
             elif spine_angle < 70:
-                body_pose = "Tilted"
+                body_pose = "Nghieng"
             else:
-                body_pose = "Lying"
+                body_pose = "Nam"
                 
             status.append(body_pose)
         else:
@@ -106,18 +106,28 @@ class PoseEstimator:
         l_arm_ang = abs(angle(spine_down, l_arm))
         r_arm_ang = abs(angle(spine_down, r_arm))
         
-        # Thresholds: <30 (Down), 80-110 (Side), >150 (Up)
-        l_state = "Down"
-        if l_arm_ang > 140: l_state = "Up"
-        elif l_arm_ang > 70: l_state = "Side"
+        # [OFFICIAL LOGIC] Phân loại trạng thái tay chi tiết theo MaixPy
+        # < 20: Drooping (Thõng xuống)
+        # < 80: Raised (Nâng nhẹ)
+        # < 110: Horizontal (Ngang vai)
+        # < 160: High (Giơ cao)
+        # >= 160: Upright (Thẳng đứng)
         
-        r_state = "Down"
-        if r_arm_ang > 140: r_state = "Up"
-        elif r_arm_ang > 70: r_state = "Side"
+        def get_arm_state(ang):
+            if ang < 20: return "Down"
+            if ang < 80: return "Low"
+            if ang < 110: return "Side"
+            if ang < 160: return "High"
+            return "Up"
+
+        l_state = get_arm_state(l_arm_ang)
+        r_state = get_arm_state(r_arm_ang)
         
-        if l_state == "Up" and r_state == "Up": status.append("Hands Up")
-        elif l_state == "Side" and r_state == "Side": status.append("T-Pose")
-        elif l_state == "Up": status.append("Left Up")
-        elif r_state == "Up": status.append("Right Up")
+        if (l_state == "High" or l_state == "Up") and (r_state == "High" or r_state == "Up"): status.append("Gio Tay")
+        elif l_state == "Side" and r_state == "Side": status.append("Dang Tay")
+        elif l_state == "Side" and (r_state == "Low" or r_state == "Down"): status.append("Dang Tay Trai")
+        elif r_state == "Side" and (l_state == "Low" or l_state == "Down"): status.append("Dang Tay Phai") 
+        elif l_state == "High" or l_state == "Up": status.append("Trai Len")
+        elif r_state == "High" or r_state == "Up": status.append("Phai Len")
         
         return status

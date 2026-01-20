@@ -1,4 +1,5 @@
 from maix import nn, image
+import config # Import config để lấy KEYPOINT_THRESHOLD
 
 class AIEngine:
     def __init__(self, model_path, conf_threshold):
@@ -10,9 +11,9 @@ class AIEngine:
 
     def load(self):
         try:
-            print("🧠 Loading YOLOv8 Pose (Single Model)...")
+            print("🧠 Loading YOLO11 Pose (Single Model)...")
             # [OFFICIAL] Bật dual_buff để tăng tốc xử lý song song
-            self.model = nn.YOLOv8(self.model_path, dual_buff=True)
+            self.model = nn.YOLO11(self.model_path, dual_buff=True)
             return True
         except Exception as e:
             print(f"❌ Error: {e}")
@@ -48,7 +49,9 @@ class AIEngine:
                 img_input.draw_image(pad_w, pad_h, img_resized)
 
             # Chạy Model lần 1 để lấy Box
-            objs = self.model.detect(img_input, conf_th=self.threshold, iou_th=0.45)
+            # [FIX] Thêm keypoint_th để NPU không lọc bỏ điểm xương quá sớm
+            # Dùng config.KEYPOINT_THRESHOLD (0.15) để bắt được cả điểm mờ
+            objs = self.model.detect(img_input, conf_th=self.threshold, iou_th=0.45, keypoint_th=config.KEYPOINT_THRESHOLD)
             
             for obj in objs:
                 # Map Box gốc từ YOLO
@@ -69,11 +72,16 @@ class AIEngine:
                 # Map Points (Lấy dữ liệu trực tiếp từ AI Global)
                 final_points = []
                 if obj.points:
-                    for i in range(0, len(obj.points), 3):
-                        if i + 2 >= len(obj.points): break
-                        px = (obj.points[i] - pad_w) / ratio
-                        py = (obj.points[i+1] - pad_h) / ratio
-                        conf = obj.points[i+2]
+                    # [FIX CRITICAL] Tự động xác định stride để tránh lỗi lệch pha dữ liệu
+                    # Nếu độ dài chia hết cho 3 -> [x, y, conf]. Nếu không -> [x, y]
+                    stride = 3 if len(obj.points) % 3 == 0 else 2
+                    num_points = len(obj.points) // stride
+
+                    for i in range(num_points):
+                        base = i * stride
+                        px = (obj.points[base] - pad_w) / ratio
+                        py = (obj.points[base+1] - pad_h) / ratio
+                        conf = obj.points[base+2] if stride == 3 else 1.0
                         final_points.extend([px, py, conf])
 
                 # Convert sang int và kẹp biên

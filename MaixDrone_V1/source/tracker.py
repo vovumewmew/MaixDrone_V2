@@ -90,28 +90,9 @@ class ObjectTracker:
                 raw_points = res.get('points', [])
                 old_points = self.objects[oid].get('points', [])
                 
-                # [L2 ALGORITHM] Tính điểm ổn định (Stability Score) bằng Euclid Distance
-                # Nếu tổng khoảng cách di chuyển của các khớp nhỏ -> Điểm cao (Ổn định)
-                l2_sum = 0
-                valid_cnt = 0
-                if old_points and raw_points:
-                    for i in range(0, len(raw_points), 3):
-                        # Chỉ tính nếu điểm đó tồn tại ở cả 2 frame
-                        if i+2 < len(old_points) and raw_points[i+2] > 0 and old_points[i+2] > 0:
-                            dx = raw_points[i] - old_points[i]
-                            dy = raw_points[i+1] - old_points[i+1]
-                            l2_sum += math.sqrt(dx*dx + dy*dy) # Công thức Euclid
-                            valid_cnt += 1
-                
-                # Quy đổi ra điểm số (0-100). Di chuyển trung bình > 5px là mất điểm.
-                avg_move = l2_sum / valid_cnt if valid_cnt > 0 else 10
-                stability = max(0, min(100, 100 - avg_move * 10))
-                
-                filtered_points, quality = self.filter.filter_kpts(oid, t_now, raw_points, raw_box)
+                filtered_points = self.filter.filter_kpts(oid, t_now, raw_points)
 
                 self.objects[oid]['points'] = filtered_points
-                self.objects[oid]['quality'] = quality
-                self.objects[oid]['stability_score'] = stability # Lưu điểm L2
                 
                 # [GESTURE] Phân tích cử chỉ
                 gestures = self.objects[oid]['estimator'].update(filtered_points)
@@ -174,7 +155,6 @@ class ObjectTracker:
                     'box': data['box'],
                     'score': data.get('score', 0.0),
                     'points': data.get('points', []), # Truyền điểm ra UI
-                    'vector_score': data.get('vector_score', 0), # Truyền điểm số ra UI
                     'gestures': data.get('gestures', []) # Truyền cử chỉ ra UI
                 })
         return results

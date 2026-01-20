@@ -14,6 +14,14 @@ class HUD:
         self.C_BLACK = image.Color(0, 0, 0)      # Màu Đen
         self.C_CYAN = image.Color(0, 255, 255)   # Màu Xanh Lơ (Cyan)
         
+        # --- CẤU HÌNH HIỂN THỊ (Sửa True/False để Bật/Tắt các phần bạn muốn) ---
+        self.SHOW_FPS = True         # Hiển thị FPS góc trái
+        self.SHOW_COUNT = True       # Hiển thị số lượng người (Count: X)
+        self.SHOW_BOX = True         # Hiển thị khung chữ nhật bao quanh người
+        self.SHOW_INFO = True        # Hiển thị ID và độ tin cậy (%)
+        self.SHOW_GESTURE = True     # Hiển thị tên cử chỉ (Giơ tay, ngồi...)
+        self.SHOW_SKELETON = True    # Hiển thị bộ xương và khớp nối
+
         # Định nghĩa các cặp điểm nối xương (COCO Format)
         self.SKELETON = [
             (0, 1), (0, 2), (1, 3), (2, 4),         # Đầu
@@ -23,13 +31,15 @@ class HUD:
         ]
         
     def draw_fps(self, img, fps):
+        if not self.SHOW_FPS: return
         # Giảm scale từ 2.0 -> 1.2
         img.draw_string(10, 10, f"FPS: {int(fps)}", self.C_WHITE, 1.2)
 
     def draw_ai_result(self, img, results):
         # Vẽ số lượng người
         count = len(results)
-        img.draw_string(10, 30, f"Count: {count}", self.C_YELLOW, 1.2)
+        if self.SHOW_COUNT:
+            img.draw_string(10, 30, f"Count: {count}", self.C_YELLOW, 1.2)
 
         if not results: return
 
@@ -40,47 +50,46 @@ class HUD:
             bx, by, bw, bh = obj['box']
             
             # 1. Vẽ Khung bao (Màu Hồng)
-            img.draw_rect(int(bx), int(by), int(bw), int(bh), self.C_PINK, 2)
+            if self.SHOW_BOX:
+                img.draw_rect(int(bx), int(by), int(bw), int(bh), self.C_PINK, 2)
             
             # 2. Vẽ Nhãn (ID + Score)
-            text = f"ID:{oid} {int(score * 100)}%"
-            img.draw_string(int(bx), int(by) - 20, text, self.C_PINK, 1.2)
+            if self.SHOW_INFO:
+                text = f"ID:{oid} {int(score * 100)}%"
+                img.draw_string(int(bx), int(by) - 20, text, self.C_PINK, 0.7)
             
             lx = int(bx)
             
-            # [MỚI] Hiển thị Vector Score (Độ ổn định cấu trúc)
-            v_score = obj.get('vector_score', 0)
-            if v_score > 0:
-                s_color = self.C_GREEN if v_score > 85 else self.C_RED
-                s_text = f"Struct: {int(v_score)}%"
-                # Vẽ ở góc dưới bên trái Box
-                img.draw_string(lx, int(by + bh) + 5, s_text, s_color, 1.0)
-                
             # [GESTURE] Hiển thị cử chỉ nhận diện được
-            gestures = obj.get('gestures', [])
-            if gestures:
-                g_text = " | ".join(gestures)
-                img.draw_string(lx, int(by) - 40, g_text, self.C_YELLOW, 1.5)
+            if self.SHOW_GESTURE:
+                gestures = obj.get('gestures', [])
+                if gestures:
+                    g_text = " + ".join(gestures)
+                    # [UI] Giảm kích thước chữ 50% (1.5 -> 0.8) cho gọn
+                    img.draw_string(lx, int(by) - 40, g_text, self.C_YELLOW, 0.8)
 
             # 3. Vẽ Xương (Pose) - Raw Output
-            points = obj.get('points', [])
-            joints = {}
-            
-            # [OFFICIAL STYLE] Vẽ đơn giản, trực tiếp, không lọc cầu kỳ
-            # Nếu SDK hỗ trợ detector.draw_pose thì tốt, nhưng ở đây ta tách rời UI và AI
-            # nên ta sẽ vẽ thủ công nhưng theo phong cách "Raw" của họ.
-            
-            # Vẽ Skeleton (Nối dây trước cho đỡ đè lên điểm)
-            for i in range(0, len(points), 3):
-                if points[i+2] > 0: # Chỉ cần conf > 0 là lưu
-                    joints[i//3] = (int(points[i]), int(points[i+1]))
+            if self.SHOW_SKELETON:
+                points = obj.get('points', [])
+                joints = {}
+                
+                # [POLISH] Tự động xác định stride (bước nhảy)
+                stride = 3 if len(points) % 3 == 0 else 2
+                num_points = len(points) // stride
 
-            for i, j in self.SKELETON:
-                if i in joints and j in joints:
-                    # Màu trắng, nét mảnh (1px)
-                    img.draw_line(joints[i][0], joints[i][1], joints[j][0], joints[j][1], self.C_WHITE, 1)
+                # 1. Lấy danh sách khớp hợp lệ
+                for i in range(num_points):
+                    base = i * stride
+                    conf = points[base+2] if stride == 3 else 1.0
+                    # [FIX] Lọc bỏ điểm ma ở góc trái trên (0,0) - Chỉ vẽ nếu toạ độ > 5
+                    if conf > 0 and (points[base] > 5 or points[base+1] > 5):
+                        joints[i] = (int(points[base]), int(points[base+1]))
 
-            # Vẽ Khớp (Đè lên dây)
-            for idx, (px, py) in joints.items():
-                # Màu Cyan, bán kính 2
-                img.draw_circle(px, py, 2, self.C_CYAN, -1)
+                # 2. Vẽ dây (Line) - Màu Trắng
+                for i, j in self.SKELETON:
+                    if i in joints and j in joints:
+                        img.draw_line(joints[i][0], joints[i][1], joints[j][0], joints[j][1], self.C_WHITE, 1)
+
+                # 3. Vẽ Khớp (Dot) - Màu Trắng (Đè lên dây)
+                for px, py in joints.values():
+                    img.draw_circle(px, py, 2, self.C_WHITE, -1)
