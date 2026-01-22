@@ -127,7 +127,7 @@ class PoseEstimator:
         elif l_state == "Side" and r_state == "Side": status.append("Dang Tay")
         elif l_state == "Side" and (r_state == "Low" or r_state == "Down"): status.append("Dang Tay Trai")
         elif r_state == "Side" and (l_state == "Low" or l_state == "Down"): status.append("Dang Tay Phai") 
-        elif l_state == "High" or l_state == "Up": status.append("Trai Len")
-        elif r_state == "High" or r_state == "Up": status.append("Phai Len")
+        elif (l_state == "High" or l_state == "Up") and (r_state == "Low" or r_state == "Down"): status.append("Trai Len")
+        elif (r_state == "High" or r_state == "Up") and (l_state == "Low" or l_state == "Down"): status.append("Phai Len")
         
         return status

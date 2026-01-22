@@ -6,14 +6,14 @@ PORT = 80
 TIMEOUT = 3.0
 
 # --- CẤU HÌNH CAMERA (CHẾ ĐỘ HD) ---
-CAM_WIDTH = 320     # [FIX] Giảm về 320 để tránh lỗi Out of Memory (OOM)
-CAM_HEIGHT = 224    # [FIX] Khớp với Input AI -> Tốc độ cao nhất, không cần Resize
+CAM_WIDTH = 320     # Chiều rộng (Width)
+CAM_HEIGHT = 240    # Chiều cao (Height)
 JPEG_QUALITY = 25   
 FPS_LIMIT = 30      
 
 # --- CẤU HÌNH AI ---
 ENABLE_AI = True   
-MODEL_PATH = "/root/models/yolo11n_pose.mud"        # 1 Model duy nhất (Vừa Detect vừa Pose)
+MODEL_PATH = "/root/models/yolo11n_pose.mud"        # Hỗ trợ đuôi .mud (ưu tiên) hoặc .cvimodel
 
 # Ngưỡng tin cậy cho Detect (thường Detect nhạy hơn nên để cao chút cho chắc)
 CONF_THRESHOLD = 0.4 # [TUNING] Hạ xuống chút để bắt người dễ hơn
@@ -21,3 +21,4 @@ KEYPOINT_THRESHOLD = 0.10 # [TRUST AI] Hạ xuống 0.10 để bắt mọi đi�
 
 # --- CẤU HÌNH BỘ LỌC (FILTERING & POST-PROCESSING) ---
 POSE_CONF_THRESHOLD = 0.10      # [TRUST AI] Hạ thấp ngưỡng lọc đầu ra
+STICKY_DEADZONE = 2.0           # [ACCURACY] Giảm Deadzone để bắt được chuyển động nhỏ

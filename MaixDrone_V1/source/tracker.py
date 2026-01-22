@@ -77,8 +77,8 @@ class ObjectTracker:
                 old_box = old_data['box']
 
                 # [EMA SMOOTHING] Bật lại làm mượt để chống rung (Jitter)
-                # [TUNING] Tăng Alpha lên 0.6 để Box bám nhanh hơn (giảm độ trễ)
-                alpha = 0.6
+                # [TUNING] Tăng Alpha lên 0.7 để Box bám sát người hơn
+                alpha = 0.7
                 smooth_box = [r * alpha + o * (1 - alpha) for r, o in zip(raw_box, old_box)]
                 
                 self.objects[oid]['box'] = smooth_box
@@ -88,11 +88,18 @@ class ObjectTracker:
                 
                 # [FILTERING] Chỉ lọc điểm (Points) để chống rung
                 raw_points = res.get('points', [])
+                
                 old_points = self.objects[oid].get('points', [])
                 
                 filtered_points = self.filter.filter_kpts(oid, t_now, raw_points)
 
                 self.objects[oid]['points'] = filtered_points
+                
+                # [METRIC ADVANCED] Tính điểm chất lượng dựa trên OKS & MPJPE (Proxy)
+                # So sánh độ lệch giữa Raw và Filtered để đánh giá độ ổn định
+                # [UPDATE] Truyền thêm chiều cao (h) để chuẩn hóa Jitter theo kích thước người
+                pose_score = self._calculate_quality(raw_points, filtered_points, res['score'], res['h'])
+                self.objects[oid]['pose_score'] = pose_score
                 
                 # [GESTURE] Phân tích cử chỉ
                 gestures = self.objects[oid]['estimator'].update(filtered_points)
@@ -123,12 +130,18 @@ class ObjectTracker:
         raw_x = res['x']
         raw_y = res['y']
         
+        # [METRIC] Tính Pose Score ban đầu
+        raw_points = res.get('points', [])
+        # Với frame đầu tiên, filtered = raw, nên jitter = 0 -> Score cao
+        pose_score = self._calculate_quality(raw_points, raw_points, res['score'], res['h'])
+        
         self.objects[self.next_id] = {
             'box': [raw_x, raw_y, raw_w, raw_h],
             'score': res['score'],
             'miss': 0,
             'velocity': [0.0, 0.0, 0.0, 0.0], # px/s
             'last_time': time.time(),
+            'pose_score': pose_score, # [NEW] Lưu độ tin cậy Pose
             'prev_raw_box': [raw_x, raw_y, raw_w, raw_h],
             'points': res.get('points', []), # [RAW] Lưu điểm thô
             'estimator': PoseEstimator(), # [NEW] Khởi tạo bộ phân tích cử chỉ riêng
@@ -154,6 +167,7 @@ class ObjectTracker:
                     'id': oid,
                     'box': data['box'],
                     'score': data.get('score', 0.0),
+                    'pose_score': data.get('pose_score', 0.0), # [NEW] Truyền ra UI
                     'points': data.get('points', []), # Truyền điểm ra UI
                     'gestures': data.get('gestures', []) # Truyền cử chỉ ra UI
                 })
@@ -166,3 +180,55 @@ class ObjectTracker:
         # [TEST] Tắt tính toán dự đoán (Zero Order Hold) để kiểm tra độ ổn định
         # Box sẽ đứng yên trong các frame bị skip
         return self.get_display_objects()
+
+    def _calculate_quality(self, raw_points, filtered_points, det_score=0.0, bbox_height=1.0):
+        """
+        Tính điểm chất lượng Pose (Hybrid OKS/MPJPE Proxy):
+        Formula: Accuracy = DetectScore * (0.45 * PoseConf + 0.35 * Stability + 0.20 * Visibility)
+        """
+        # Các khớp quan trọng: Vai, Khuỷu, Cổ tay, Hông, Gối, Cổ chân
+        target_indices = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        
+        sum_conf = 0.0
+        sum_jitter = 0.0
+        count = 0
+        
+        for i in target_indices:
+            base = i * 3
+            if base + 2 >= len(raw_points) or base + 2 >= len(filtered_points): 
+                continue
+                
+            # Raw (x, y, conf) vs Filtered (x, y, conf)
+            rx, ry, rc = raw_points[base], raw_points[base+1], raw_points[base+2]
+            fx, fy = filtered_points[base], filtered_points[base+1]
+            
+            if rc > 0:
+                sum_conf += rc
+                # [MPJPE Proxy] Tính khoảng cách giữa điểm thô và điểm đã lọc (Jitter)
+                dist = math.sqrt((rx - fx)**2 + (ry - fy)**2)
+                
+                # [NORMALIZE] Chuẩn hóa Jitter theo kích thước người (Scale Invariant)
+                # Người to (gần) rung 5px là ít, người nhỏ (xa) rung 5px là nhiều.
+                norm_dist = dist / (bbox_height + 1e-6)
+                sum_jitter += norm_dist
+                count += 1
+                
+        if count == 0: return 0.0
+        
+        avg_conf = sum_conf / count
+        # [CLAMP & SCALE] Kẹp giá trị max 1.0 và tăng độ nhạy (căn bậc 2)
+        avg_conf = min(avg_conf, 1.0) ** 0.5
+        
+        avg_jitter = sum_jitter / count
+        
+        # [OKS Formula] Mô phỏng hàm mũ của OKS: exp(-error^2 / 2*sigma^2)
+        # [UPDATE] Sigma = 0.1 (tương đương 10% chiều cao cơ thể)
+        stability_score = math.exp(-(avg_jitter**2) / (2 * (0.1**2)))
+        
+        # [VISIBILITY] Tỷ lệ số điểm nhìn thấy trên tổng số điểm quan trọng
+        visibility = count / len(target_indices)
+
+    
+        final_score = det_score * (0.45 * avg_conf + 0.35 * stability_score + 0.20 * visibility)
+        
+        return final_score

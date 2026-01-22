@@ -1,4 +1,5 @@
 from maix import image
+import time
 import config
 from maix import nn # Import để dùng hàm vẽ tĩnh nếu cần (tùy phiên bản SDK)
 
@@ -30,6 +31,14 @@ class HUD:
             (11, 13), (13, 15), (12, 14), (14, 16)  # Chân
         ]
         
+        self.last_print_time = time.time()
+        self.keypoint_names = {
+            0: "Nose", 1: "L-Eye", 2: "R-Eye", 3: "L-Ear", 4: "R-Ear",
+            5: "L-Sho", 6: "R-Sho", 7: "L-Elb", 8: "R-Elb", 9: "L-Wri",
+            10: "R-Wri", 11: "L-Hip", 12: "R-Hip", 13: "L-Knee", 14: "R-Knee",
+            15: "L-Ank", 16: "R-Ank"
+        }
+        
     def draw_fps(self, img, fps):
         if not self.SHOW_FPS: return
         # Giảm scale từ 2.0 -> 1.2
@@ -43,10 +52,16 @@ class HUD:
 
         if not results: return
 
+        do_print = False
+        if time.time() - self.last_print_time > 2.0:
+            do_print = True
+            self.last_print_time = time.time()
+
         for obj in results:
             # Lấy thông tin từ Tracker
             oid = obj['id']
             score = obj.get('score', 0.0)
+            pose_score = obj.get('pose_score', 0.0)
             bx, by, bw, bh = obj['box']
             
             # 1. Vẽ Khung bao (Màu Hồng)
@@ -55,7 +70,8 @@ class HUD:
             
             # 2. Vẽ Nhãn (ID + Score)
             if self.SHOW_INFO:
-                text = f"ID:{oid} {int(score * 100)}%"
+                # [UI] Hiển thị thêm độ chính xác Pose: "ID:1 85% Pose:70%"
+                text = f"ID:{oid} {int(score * 100)}% Pose:{int(pose_score * 100)}%"
                 img.draw_string(int(bx), int(by) - 20, text, self.C_PINK, 0.7)
             
             lx = int(bx)
@@ -66,7 +82,7 @@ class HUD:
                 if gestures:
                     g_text = " + ".join(gestures)
                     # [UI] Giảm kích thước chữ 50% (1.5 -> 0.8) cho gọn
-                    img.draw_string(lx, int(by) - 40, g_text, self.C_YELLOW, 0.8)
+                    img.draw_string(int(bx + bw) + 5, int(by), g_text, self.C_YELLOW, 0.8)
 
             # 3. Vẽ Xương (Pose) - Raw Output
             if self.SHOW_SKELETON:
@@ -93,3 +109,20 @@ class HUD:
                 # 3. Vẽ Khớp (Dot) - Màu Trắng (Đè lên dây)
                 for px, py in joints.values():
                     img.draw_circle(px, py, 2, self.C_WHITE, -1)
+            
+            if do_print:
+                points = obj.get('points', [])
+                stride = 3 if len(points) % 3 == 0 else 2
+                num_points = len(points) // stride
+                
+                info = []
+                for i in range(num_points):
+                    base = i * stride
+                    x = int(points[base])
+                    y = int(points[base+1])
+                    name = self.keypoint_names.get(i, str(i))
+                    info.append(f"{name}:({x},{y})")
+                print(f"ID{oid}: " + ", ".join(info))
+        
+        if do_print:
+            print()

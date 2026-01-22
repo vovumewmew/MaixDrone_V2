@@ -6,14 +6,27 @@ class AIEngine:
         self.model_path = model_path
         self.threshold = conf_threshold
         self.model = None
-        self.input_w = 320
-        self.input_h = 224
+        self.input_w = 0 # [AUTO] Sẽ tự cập nhật theo Model
+        self.input_h = 0 # [AUTO] Sẽ tự cập nhật theo Model
 
     def load(self):
         try:
-            print("🧠 Loading YOLO11 Pose (Single Model)...")
-            # [OFFICIAL] Bật dual_buff để tăng tốc xử lý song song
-            self.model = nn.YOLO11(self.model_path, dual_buff=True)
+            print(f"🧠 Loading Model: {self.model_path}")
+            
+            # [AUTO-DETECT] Tự động chọn class phù hợp với phiên bản YOLO
+            path_lower = self.model_path.lower()
+            if "yolov5" in path_lower:
+                self.model = nn.YOLOv5(self.model_path, dual_buff=True)
+            elif "yolov8" in path_lower:
+                self.model = nn.YOLOv8(self.model_path, dual_buff=True)
+            else:
+                self.model = nn.YOLO11(self.model_path, dual_buff=True)
+            
+            # [NEW] Tự động lấy kích thước input từ Model
+            self.input_w = self.model.input_width()
+            self.input_h = self.model.input_height()
+            print(f"📏 Model Input Size: {self.input_w}x{self.input_h}")
+            
             return True
         except Exception as e:
             print(f"❌ Error: {e}")
@@ -51,7 +64,12 @@ class AIEngine:
             # Chạy Model lần 1 để lấy Box
             # [FIX] Thêm keypoint_th để NPU không lọc bỏ điểm xương quá sớm
             # Dùng config.KEYPOINT_THRESHOLD (0.15) để bắt được cả điểm mờ
-            objs = self.model.detect(img_input, conf_th=self.threshold, iou_th=0.45, keypoint_th=config.KEYPOINT_THRESHOLD)
+            
+            # [COMPATIBILITY] YOLOv5 trong SDK không hỗ trợ tham số keypoint_th
+            if isinstance(self.model, nn.YOLOv5):
+                objs = self.model.detect(img_input, conf_th=self.threshold, iou_th=0.45)
+            else:
+                objs = self.model.detect(img_input, conf_th=self.threshold, iou_th=0.45, keypoint_th=config.KEYPOINT_THRESHOLD)
             
             for obj in objs:
                 # Map Box gốc từ YOLO
