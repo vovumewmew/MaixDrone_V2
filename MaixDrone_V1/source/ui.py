@@ -53,6 +53,7 @@ class HUD:
         if not results: return
 
         do_print = False
+        notification_msg = None # Biến lưu nội dung thông báo
         if time.time() - self.last_print_time > 2.0:
             do_print = True
             self.last_print_time = time.time()
@@ -70,8 +71,8 @@ class HUD:
             
             # 2. Vẽ Nhãn (ID + Score)
             if self.SHOW_INFO:
-                # [UI] Hiển thị thêm độ chính xác Pose: "ID:1 85% Pose:70%"
-                text = f"ID:{oid} {int(score * 100)}% Pose:{int(pose_score * 100)}%"
+                # [UI] Tối giản: Chỉ hiện ID và Pose Score (Bỏ Detect Score)
+                text = f"ID:{oid} Pose:{int(pose_score * 100)}%"
                 img.draw_string(int(bx), int(by) - 20, text, self.C_PINK, 0.7)
             
             lx = int(bx)
@@ -81,6 +82,13 @@ class HUD:
                 gestures = obj.get('gestures', [])
                 if gestures:
                     g_text = " + ".join(gestures)
+                    
+                    # [NOTIFY] Hiển thị thông báo trạng thái hệ thống
+                    if "Trai Cao" in gestures:
+                        notification_msg = "shortage of material"
+                    elif "Phai Cao" in gestures:
+                        notification_msg = "technical or quality issue"
+
                     # [UI] Giảm kích thước chữ 50% (1.5 -> 0.8) cho gọn
                     img.draw_string(int(bx + bw) + 5, int(by), g_text, self.C_YELLOW, 0.8)
 
@@ -97,14 +105,20 @@ class HUD:
                 for i in range(num_points):
                     base = i * stride
                     conf = points[base+2] if stride == 3 else 1.0
-                    # [FIX] Lọc bỏ điểm ma ở góc trái trên (0,0) - Chỉ vẽ nếu toạ độ > 5
-                    if conf > 0 and (points[base] > 5 or points[base+1] > 5):
+                    # [FIX] Lọc bỏ điểm ma ở góc trái trên (0,0) - Giảm ngưỡng từ 5 xuống 1
+                    if conf > 0 and (points[base] > 1 or points[base+1] > 1):
                         joints[i] = (int(points[base]), int(points[base+1]))
 
                 # 2. Vẽ dây (Line) - Màu Trắng
                 for i, j in self.SKELETON:
                     if i in joints and j in joints:
                         img.draw_line(joints[i][0], joints[i][1], joints[j][0], joints[j][1], self.C_WHITE, 1)
+                
+                # [CUSTOM] Vẽ đường nối từ Mũi (0) xuống Trung điểm Vai (5,6) - Tạo cảm giác cổ/ngực
+                if 0 in joints and 5 in joints and 6 in joints:
+                    mx = int((joints[5][0] + joints[6][0]) / 2)
+                    my = int((joints[5][1] + joints[6][1]) / 2)
+                    img.draw_line(joints[0][0], joints[0][1], mx, my, self.C_WHITE, 1)
 
                 # 3. Vẽ Khớp (Dot) - Màu Trắng (Đè lên dây)
                 for px, py in joints.values():
@@ -124,5 +138,54 @@ class HUD:
                     info.append(f"{name}:({x},{y})")
                 print(f"ID{oid}: " + ", ".join(info))
         
+        # [UI] Vẽ thông báo ở góc dưới màn hình (nếu có)
+        if notification_msg:
+            self._draw_notification(img, notification_msg)
+            
         if do_print:
             print()
+
+    def _draw_notification(self, img, text):
+        """Vẽ thông báo nền trắng chữ đen ở góc dưới (Auto Wrap)"""
+        scale = 1.6 
+        char_w = 8 * scale 
+        line_h = 20 * scale 
+        
+        # [AUTO WRAP] Tự động xuống dòng nếu quá dài (Max 80% màn hình)
+        max_width = self.width * 0.8
+        
+        words = text.split(' ')
+        lines = []
+        current_line = words[0]
+        
+        for word in words[1:]:
+            if (len(current_line) + 1 + len(word)) * char_w <= max_width:
+                current_line += " " + word
+            else:
+                lines.append(current_line)
+                current_line = word
+        lines.append(current_line)
+        
+        # Tính kích thước Box
+        max_len = max(len(line) for line in lines)
+        text_w = max_len * char_w
+        text_h = len(lines) * line_h
+        
+        # [REQ] Chiều dài box = text + 20px padding (5px trái + 15px phải)
+        box_w = int(text_w + 20)
+        # [REQ] Giảm chiều cao box (Padding trên dưới 5px thay vì 10px -> Giảm ~20% tổng thể)
+        box_h = int(text_h + 10)
+        
+        x = int((self.width - box_w) / 2)
+        y = int(self.height - box_h - 20) # Cách đáy 20px
+        
+        # Vẽ nền trắng (Filled = -1)
+        img.draw_rect(x, y, box_w, box_h, self.C_WHITE, -1)
+        
+        # Vẽ chữ đen đậm (vẽ 2 lần lệch nhau 1px để tạo hiệu ứng đậm)
+        for i, line in enumerate(lines):
+            ly = int(y + 5 + i * line_h) # Padding top 5px
+            lx = int(x + 5)              # Padding left 5px
+            
+            img.draw_string(lx, ly, line, self.C_BLACK, scale)
+            img.draw_string(lx + 1, ly, line, self.C_BLACK, scale)

@@ -37,6 +37,7 @@ class PoseEstimator:
         def dot(v1, v2): return v1[0]*v2[0] + v1[1]*v2[1]
         def cross(v1, v2): return v1[0]*v2[1] - v1[1]*v2[0]
         def angle(v1, v2): return math.degrees(math.atan2(cross(v1, v2), dot(v1, v2)))
+        def dist(p1, p2): return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
         
         # Indices (COCO)
         # 5,6: Shoulders | 11,12: Hips | 7,8: Elbows | 9,10: Wrists | 13,14: Knees
@@ -90,44 +91,87 @@ class PoseEstimator:
             spine_down = (0, 1)
 
         # --- 2. ARM STATE (Control Signals) ---
-        # Upper Arm Vector (Shoulder to Elbow)
-        # Cần check xem có tay không
-        if kp[7][0] == 0 or kp[8][0] == 0: return status # Thiếu khuỷu tay -> Thoát
-
-        l_arm = vec(kp[5], kp[7])
-        r_arm = vec(kp[6], kp[8])
+        # [STRICT LOGIC] Góc A (Vai) và Góc B (Khuỷu)
+        # Góc A: Giữa thân dưới (Spine Down) và bắp tay (Vai -> Khuỷu)
+        # Góc B: Góc trong khuỷu tay (180 là thẳng, 90 là vuông)
         
-        # Angle relative to Spine (inverted to point down)
         if has_hips and has_shoulders:
             spine_down = (-spine[0], -spine[1])
         else:
-            spine_down = (0, 1) # Giả định người đứng thẳng
-        
-        l_arm_ang = abs(angle(spine_down, l_arm))
-        r_arm_ang = abs(angle(spine_down, r_arm))
-        
-        # [OFFICIAL LOGIC] Phân loại trạng thái tay chi tiết theo MaixPy
-        # < 20: Drooping (Thõng xuống)
-        # < 80: Raised (Nâng nhẹ)
-        # < 110: Horizontal (Ngang vai)
-        # < 160: High (Giơ cao)
-        # >= 160: Upright (Thẳng đứng)
-        
-        def get_arm_state(ang):
-            if ang < 20: return "Down"
-            if ang < 80: return "Low"
-            if ang < 110: return "Side"
-            if ang < 160: return "High"
-            return "Up"
+            spine_down = (0, 1)
 
-        l_state = get_arm_state(l_arm_ang)
-        r_state = get_arm_state(r_arm_ang)
-        
-        if (l_state == "High" or l_state == "Up") and (r_state == "High" or r_state == "Up"): status.append("Gio Tay")
-        elif l_state == "Side" and r_state == "Side": status.append("Dang Tay")
-        elif l_state == "Side" and (r_state == "Low" or r_state == "Down"): status.append("Dang Tay Trai")
-        elif r_state == "Side" and (l_state == "Low" or l_state == "Down"): status.append("Dang Tay Phai") 
-        elif (l_state == "High" or l_state == "Up") and (r_state == "Low" or r_state == "Down"): status.append("Trai Len")
-        elif (r_state == "High" or r_state == "Up") and (l_state == "Low" or l_state == "Down"): status.append("Phai Len")
+        l_status = None
+        r_status = None
+
+        # --- TAY TRÁI (Left Arm) ---
+        # Cần: Vai(5), Khuỷu(7), Cổ tay(9)
+        if kp[5][0] != 0 and kp[7][0] != 0 and kp[9][0] != 0:
+            # Góc A: Thân dưới vs Vai->Khuỷu
+            v_sho_elb = vec(kp[5], kp[7])
+            ang_A = abs(angle(spine_down, v_sho_elb))
+            
+            # Góc B: Khuỷu->Vai vs Khuỷu->Cổ tay (Góc trong khuỷu tay)
+            v_elb_sho = vec(kp[7], kp[5])
+            v_elb_wri = vec(kp[7], kp[9])
+            ang_B = abs(angle(v_elb_sho, v_elb_wri))
+            
+            # [NEW] Góc C: Vai->Hông vs Vai->Cổ tay
+            ang_C = 0
+            if kp[11][0] != 0:
+                v_sho_hip = vec(kp[5], kp[11])
+                v_sho_wri = vec(kp[5], kp[9])
+                ang_C = abs(angle(v_sho_hip, v_sho_wri))
+            
+            if 140 < ang_A < 180 and 75 < ang_B < 90:
+                l_status = "Trai Cao Vuong"
+            elif 70 < ang_A < 100 and 60 < ang_B < 100:
+                l_status = "Trai Vuong"
+            elif 70 < ang_A < 100 and 140 < ang_B < 180:
+                l_status = "Trai Ngang"
+            elif 140 < ang_C < 180:
+                l_status = "Trai Cao"
+
+        # --- TAY PHẢI (Right Arm) ---
+        # Cần: Vai(6), Khuỷu(8), Cổ tay(10)
+        if kp[6][0] != 0 and kp[8][0] != 0 and kp[10][0] != 0:
+            # Góc A: Thân dưới vs Vai->Khuỷu
+            v_sho_elb = vec(kp[6], kp[8])
+            ang_A = abs(angle(spine_down, v_sho_elb))
+            
+            # Góc B: Khuỷu->Vai vs Khuỷu->Cổ tay
+            v_elb_sho = vec(kp[8], kp[6])
+            v_elb_wri = vec(kp[8], kp[10])
+            ang_B = abs(angle(v_elb_sho, v_elb_wri))
+            
+            # [NEW] Góc C: Vai->Hông vs Vai->Cổ tay
+            ang_C = 0
+            if kp[12][0] != 0:
+                v_sho_hip = vec(kp[6], kp[12])
+                v_sho_wri = vec(kp[6], kp[10])
+                ang_C = abs(angle(v_sho_hip, v_sho_wri))
+            
+            if 140 < ang_A < 180 and 75 < ang_B < 90:
+                r_status = "Phai Cao Vuong"
+            elif 70 < ang_A < 100 and 60 < ang_B < 100:
+                r_status = "Phai Vuong"
+            elif 70 < ang_A < 100 and 140 < ang_B < 180:
+                r_status = "Phai Ngang"
+            elif 120 < ang_A < 140 and 120 < ang_B < 180:
+                r_status = "Phai Cao"
+
+        # --- 3. COMBINED GESTURES (Tư thế phối hợp) ---
+        # Logic mới: Kết hợp từ trạng thái đơn lẻ "Cao Vuong"
+
+        # Tổng hợp trạng thái
+        # [UPDATE] Ưu tiên hiển thị tư thế kết hợp, ẩn tư thế con
+        if l_status == "Trai Cao Vuong" and r_status == "Phai Cao Vuong":
+            status.append("Cheo Tay Tren Dau")
+        elif l_status == "Trai Ngang" and r_status == "Phai Ngang":
+            status.append("Hai Tay Ngang")
+        elif l_status == "Trai Cao" and r_status == "Phai Cao":
+            status.append("Tay Chu V")
+        else:
+            if l_status: status.append(l_status)
+            if r_status: status.append(r_status)
         
         return status

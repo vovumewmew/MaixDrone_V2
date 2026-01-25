@@ -43,64 +43,20 @@ class PoseFilter:
     def __init__(self):
         # Quản lý bộ lọc cho từng đối tượng
         self.filters = {}
+        self.miss_counts = {} # [NEW] Đếm số frame bị mất dấu để xử lý Ghosting
         self.kpt_conf_thresh = config.POSE_CONF_THRESHOLD
         self.deadzone = config.STICKY_DEADZONE
         
         # [SPECIALIZED CONFIG] Cấu hình riêng cho từng nhóm bộ phận
-        # 1. CORE (Vai, Hông): Ổn định, ít bị áo che -> Bắt nhanh (Beta cao)
-        self.cfg_core = {'min_cutoff': 0.2, 'beta': 0.8, 'd_cutoff': 1.0}
+        # [SOLID MODE] Cấu hình ưu tiên độ "Đầm" (Solid) giống Official Demo
+        # Beta thấp (0.1) -> Rất mượt, ít rung, tạo cảm giác khung xương chắc chắn
+        # Min_cutoff (0.5) -> Lọc rung mạnh khi đứng yên
         
-        # 2. LIMBS (Khuỷu, Gối, Cổ tay): Hay bị rung do áo rộng -> Lọc mạnh (Beta thấp)
-        # min_cutoff thấp (0.05) giúp triệt tiêu rung động tần số cao (nếp gấp áo)
-        self.cfg_limb = {'min_cutoff': 0.15, 'beta': 0.6, 'd_cutoff': 1.0}
+        self.cfg_core = {'min_cutoff': 0.5, 'beta': 0.1, 'd_cutoff': 1.0}
+        self.cfg_limb = {'min_cutoff': 0.5, 'beta': 0.1, 'd_cutoff': 1.0}
         
         self.core_ids = [5, 6, 11, 12] # Vai trái/phải, Hông trái/phải
         
     def filter_kpts(self, oid, t, kpts):
-        if oid not in self.filters:
-            self.filters[oid] = {}
-        
-        filtered = []
-        for i in range(0, len(kpts), 3):
-            idx = i // 3
-            x, y, conf = kpts[i], kpts[i+1], kpts[i+2]
-
-            # [POLISH] Chỉ lọc bỏ nếu độ tin cậy quá thấp (Noise)
-            if conf < self.kpt_conf_thresh:
-                filtered.extend([x, y, 0.0])
-                continue
-
-            # Chọn cấu hình bộ lọc dựa trên bộ phận cơ thể
-            # Nếu là Thân mình -> Dùng cfg_core (Nhanh). Nếu là Tay chân -> Dùng cfg_limb (Mượt)
-            curr_cfg = self.cfg_core if idx in self.core_ids else self.cfg_limb
-
-            # Khởi tạo bộ lọc OneEuro cho điểm mới
-            if idx not in self.filters[oid]:
-                self.filters[oid][idx] = [
-                    OneEuroFilter(t, x, **curr_cfg),
-                    OneEuroFilter(t, y, **curr_cfg)
-                ]
-            
-            # [STICKY LOGIC] Cơ chế "Dính chặt" (Deadzone)
-            # Lấy vị trí cũ đã lọc
-            prev_x = self.filters[oid][idx][0].x_prev
-            prev_y = self.filters[oid][idx][1].x_prev
-            
-            # Tính khoảng cách di chuyển so với frame trước
-            dist = math.sqrt((x - prev_x)**2 + (y - prev_y)**2)
-            
-            # Nếu di chuyển nhỏ hơn ngưỡng Deadzone (do áo rung) -> Giữ nguyên vị trí cũ
-            # Trừ khi đây là frame đầu tiên (prev = 0)
-            if dist < self.deadzone and prev_x != 0:
-                filtered.extend([prev_x, prev_y, conf])
-                # Cập nhật thời gian cho bộ lọc nhưng không đổi giá trị
-                self.filters[oid][idx][0].t_prev = t
-                self.filters[oid][idx][1].t_prev = t
-                continue
-
-            # Áp dụng làm mượt (Smoothing)
-            fx = self.filters[oid][idx][0](t, x)
-            fy = self.filters[oid][idx][1](t, y)
-            filtered.extend([fx, fy, conf])
-                
-        return filtered
+        # [BYPASS] Tắt toàn bộ bộ lọc, trả về dữ liệu thô từ AI
+        return kpts
