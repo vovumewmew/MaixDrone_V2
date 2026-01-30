@@ -4,6 +4,16 @@ class PoseEstimator:
     def __init__(self, history_size=5):
         self.history = []
         self.history_size = history_size
+        
+        # [NEW] Biến theo dõi cử chỉ Vẫy Tay Phải (Wave Right)
+        self.wave_r_cnt = 0       # Đếm số lần đổi hướng (lắc tay)
+        self.wave_r_prev_x = 0    # Lưu vị trí X cũ để so sánh
+        self.wave_r_prev_y = 0    # [NEW] Lưu vị trí Y cũ để kiểm tra chuyển động dọc
+        
+        # [NEW] Biến theo dõi cử chỉ Vẫy Tay Trái (Wave Left)
+        self.wave_l_cnt = 0
+        self.wave_l_prev_x = 0
+        self.wave_l_prev_y = 0
 
     def update(self, keypoints):
         """
@@ -128,8 +138,42 @@ class PoseEstimator:
                 l_status = "Trai Vuong"
             elif 70 < ang_A < 100 and 140 < ang_B < 180:
                 l_status = "Trai Ngang"
-            elif 140 < ang_C < 180:
+            elif 150 < ang_C < 180:
                 l_status = "Trai Cao"
+            
+            # [NEW LOGIC] Vay Tay Trai (Wave Left) - Đối xứng với tay phải
+            if 30 < ang_A < 130:
+                curr_x = kp[9][0]
+                curr_y = kp[9][1]
+                
+                if self.wave_l_prev_x == 0: 
+                    self.wave_l_prev_x = curr_x
+                    self.wave_l_prev_y = curr_y
+                
+                # Dùng chiều rộng vai làm thước đo chuẩn
+                sho_w = dist(kp[5], kp[6])
+                if sho_w == 0: sho_w = 50
+                
+                dx = curr_x - self.wave_l_prev_x
+                dy = curr_y - self.wave_l_prev_y
+                
+                is_vertical_move = abs(dy) > abs(dx) * 4.0
+                move_thresh = sho_w * 0.025
+                
+                if abs(dx) > move_thresh and not is_vertical_move:
+                    self.wave_l_cnt += 2
+                    self.wave_l_prev_x = curr_x
+                    self.wave_l_prev_y = curr_y
+                else:
+                    if self.wave_l_cnt > 0: self.wave_l_cnt -= 1
+            else:
+                self.wave_l_cnt = 0
+                self.wave_l_prev_x = 0
+                self.wave_l_prev_y = 0
+            
+            if self.wave_l_cnt >= 5:
+                l_status = "Vay Tay Trai"
+                if self.wave_l_cnt > 40: self.wave_l_cnt = 40
 
         # --- TAY PHẢI (Right Arm) ---
         # Cần: Vai(6), Khuỷu(8), Cổ tay(10)
@@ -157,8 +201,59 @@ class PoseEstimator:
             elif 70 < ang_A < 100 and 140 < ang_B < 180:
                 r_status = "Phai Ngang"
             # [UPDATE] Mở rộng góc A lên 180 để bắt được tay giơ thẳng đứng
-            elif 140 < ang_C < 180:
+            elif 150 < ang_C < 180:
                 r_status = "Phai Cao"
+                
+            # [NEW LOGIC] Vay Tay Phai (Wave Right)
+            # Điều kiện 1: Góc nách (A) mở rộng tối đa (30; 160) để bắt mọi tầm vẫy (thấp/cao)
+            
+            # [FIX] Bỏ chặn "is_static_high" để ưu tiên Vẫy Tay nếu có chuyển động ngang mạnh
+            # is_static_high = (r_status == "Phai Cao" or r_status == "Phai Cao Vuong")
+            
+            if 30 < ang_A < 130:
+                curr_x = kp[10][0]
+                curr_y = kp[10][1] # [NEW]
+                
+                if self.wave_r_prev_x == 0: 
+                    self.wave_r_prev_x = curr_x
+                    self.wave_r_prev_y = curr_y
+                
+                # Dùng chiều rộng vai làm thước đo chuẩn
+                sho_w = dist(kp[5], kp[6])
+                if sho_w == 0: sho_w = 50 # Fallback an toàn
+                
+                # Tính độ di chuyển của cổ tay
+                dx = curr_x - self.wave_r_prev_x
+                dy = curr_y - self.wave_r_prev_y # [NEW]
+                
+                # [RELAX] Nới lỏng tối đa: Chỉ bỏ qua nếu chuyển động dọc quá áp đảo (gấp 4 lần ngang)
+                is_vertical_move = abs(dy) > abs(dx) * 4.0
+                
+                # [RELAX] Bỏ bộ lọc tay vuông (is_square_arm) để vẫy tự nhiên hơn
+                # Ngưỡng trung bình: 2.5% chiều rộng vai (Đủ nhạy nhưng không quá nhiễu)
+                move_thresh = sho_w * 0.025
+                
+                # [LOGIC] Nạp năng lượng nếu có chuyển động ngang
+                if abs(dx) > move_thresh and not is_vertical_move:
+                    # [UPDATE] Tăng tốc tích lũy: +2 điểm mỗi lần di chuyển (Nạp Nhanh)
+                    self.wave_r_cnt += 2
+                    self.wave_r_prev_x = curr_x # Cập nhật vị trí mới
+                    self.wave_r_prev_y = curr_y
+                else:
+                    # Decay: Giảm dần từ từ (-1) nếu đứng yên (Xả Chậm)
+                    if self.wave_r_cnt > 0: self.wave_r_cnt -= 1
+            else:
+                # Reset nếu tay hạ xuống hoặc không đúng tư thế
+                self.wave_r_cnt = 0
+                self.wave_r_prev_x = 0
+                self.wave_r_prev_y = 0
+            
+            # Điều kiện 2: Tích lũy đủ 5 điểm
+            if self.wave_r_cnt >= 5:
+                r_status = "Vay Tay Phai"
+                # [UPDATE] Tăng bộ đệm (Buffer) lên 40 để giữ trạng thái "Đang Vẫy" lâu hơn
+                # Tạo cảm giác mượt mà, không bị ngắt quãng khi đổi chiều tay
+                if self.wave_r_cnt > 40: self.wave_r_cnt = 40
 
         # --- 3. COMBINED GESTURES (Tư thế phối hợp) ---
         # Logic mới: Kết hợp từ trạng thái đơn lẻ "Cao Vuong"

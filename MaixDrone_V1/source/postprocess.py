@@ -41,11 +41,9 @@ class OneEuroFilter:
 
 class PoseFilter:
     def __init__(self):
-        # Quản lý bộ lọc cho từng đối tượng: { oid: { index: OneEuroFilter } }
         self.object_filters = {}
-        # [UPDATE] Tăng Beta lên 0.3 để giảm độ trễ (Lag) khi di chuyển tay nhanh
         self.min_cutoff = 0.5
-        self.beta = 0.3 
+        self.beta = 0.3
         self.d_cutoff = 1.0
 
     def filter_kpts(self, oid, t, kpts, bbox_h=1.0):

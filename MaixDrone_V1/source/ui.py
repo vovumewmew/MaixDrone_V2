@@ -54,6 +54,7 @@ class HUD:
 
         do_print = False
         notification_msg = None # Biến lưu nội dung thông báo
+        current_max_score = -1.0 # [NEW] Biến lưu điểm tin cậy cao nhất để ưu tiên hiển thị
         if time.time() - self.last_print_time > 2.0:
             do_print = True
             self.last_print_time = time.time()
@@ -84,12 +85,20 @@ class HUD:
                     g_text = " + ".join(gestures)
                     
                     # [NOTIFY] Hiển thị thông báo trạng thái hệ thống
+                    temp_msg = None
                     if "Trai Cao" in gestures:
-                        notification_msg = "shortage of material"
+                        temp_msg = "shortage of material"
                     elif "Phai Cao" in gestures:
-                        notification_msg = "technical or quality issue"
+                        temp_msg = "technical or quality issue"
                     elif "Cheo Tay Tren Dau" in gestures:
-                        notification_msg = "emergency stop"
+                        temp_msg = "emergency stop"
+                    elif "Vay Tay Phai" in gestures:
+                        temp_msg = "urgent attention"
+                    
+                    # [LOGIC] Chỉ hiển thị thông báo của người có độ tin cậy Pose cao nhất
+                    if temp_msg and pose_score > current_max_score:
+                        notification_msg = temp_msg
+                        current_max_score = pose_score
 
                     # [UI] Giảm kích thước chữ 50% (1.5 -> 0.8) cho gọn
                     img.draw_string(int(bx + bw) + 5, int(by), g_text, self.C_YELLOW, 0.8)
