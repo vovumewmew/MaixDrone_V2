@@ -88,6 +88,8 @@ class HUD:
                         notification_msg = "shortage of material"
                     elif "Phai Cao" in gestures:
                         notification_msg = "technical or quality issue"
+                    elif "Cheo Tay Tren Dau" in gestures:
+                        notification_msg = "emergency stop"
 
                     # [UI] Giảm kích thước chữ 50% (1.5 -> 0.8) cho gọn
                     img.draw_string(int(bx + bw) + 5, int(by), g_text, self.C_YELLOW, 0.8)
@@ -147,12 +149,13 @@ class HUD:
 
     def _draw_notification(self, img, text):
         """Vẽ thông báo nền trắng chữ đen ở góc dưới (Auto Wrap)"""
-        scale = 1.6 
+        # [REQ] Làm nhỏ đi ~20% (1.6 -> 1.3)
+        scale = 1.3 
         char_w = 8 * scale 
         line_h = 20 * scale 
         
-        # [AUTO WRAP] Tự động xuống dòng nếu quá dài (Max 80% màn hình)
-        max_width = self.width * 0.8
+        # [AUTO WRAP] Tự động xuống dòng khi gần hết màn hình (Chừa lề 15px mỗi bên)
+        max_width = self.width - 30
         
         words = text.split(' ')
         lines = []
@@ -168,24 +171,24 @@ class HUD:
         
         # Tính kích thước Box
         max_len = max(len(line) for line in lines)
-        text_w = max_len * char_w
-        text_h = len(lines) * line_h
+        text_w = int(max_len * char_w)
+        text_h = int(len(lines) * line_h)
         
-        # [REQ] Chiều dài box = text + 20px padding (5px trái + 15px phải)
-        box_w = int(text_w + 20)
-        # [REQ] Giảm chiều cao box (Padding trên dưới 5px thay vì 10px -> Giảm ~20% tổng thể)
-        box_h = int(text_h + 10)
+        # [REQ] Tăng chiều ngang bên phải (Tổng 60px: Trái 20px, Phải 40px)
+        box_w = int(text_w + 60)
+        # [REQ] Giảm chiều cao đi ~30% (Padding trên dưới còn 6px: Trên 3px, Dưới 3px)
+        box_h = int(text_h + 6)
         
         x = int((self.width - box_w) / 2)
-        y = int(self.height - box_h - 20) # Cách đáy 20px
+        y = int(self.height - box_h - 10) # Cách đáy 10px cho thoáng
         
         # Vẽ nền trắng (Filled = -1)
         img.draw_rect(x, y, box_w, box_h, self.C_WHITE, -1)
         
         # Vẽ chữ đen đậm (vẽ 2 lần lệch nhau 1px để tạo hiệu ứng đậm)
         for i, line in enumerate(lines):
-            ly = int(y + 5 + i * line_h) # Padding top 5px
-            lx = int(x + 5)              # Padding left 5px
+            ly = int(y + 3 + i * line_h) # Padding top 3px
+            lx = int(x + 20)             # Padding left 20px (Căn giữa box)
             
             img.draw_string(lx, ly, line, self.C_BLACK, scale)
             img.draw_string(lx + 1, ly, line, self.C_BLACK, scale)

@@ -41,22 +41,45 @@ class OneEuroFilter:
 
 class PoseFilter:
     def __init__(self):
-        # Quản lý bộ lọc cho từng đối tượng
-        self.filters = {}
-        self.miss_counts = {} # [NEW] Đếm số frame bị mất dấu để xử lý Ghosting
-        self.kpt_conf_thresh = config.POSE_CONF_THRESHOLD
-        self.deadzone = config.STICKY_DEADZONE
+        # Quản lý bộ lọc cho từng đối tượng: { oid: { index: OneEuroFilter } }
+        self.object_filters = {}
+        # [UPDATE] Tăng Beta lên 0.3 để giảm độ trễ (Lag) khi di chuyển tay nhanh
+        self.min_cutoff = 0.5
+        self.beta = 0.3 
+        self.d_cutoff = 1.0
+
+    def filter_kpts(self, oid, t, kpts, bbox_h=1.0):
+        if not kpts: return []
         
-        # [SPECIALIZED CONFIG] Cấu hình riêng cho từng nhóm bộ phận
-        # [SOLID MODE] Cấu hình ưu tiên độ "Đầm" (Solid) giống Official Demo
-        # Beta thấp (0.1) -> Rất mượt, ít rung, tạo cảm giác khung xương chắc chắn
-        # Min_cutoff (0.5) -> Lọc rung mạnh khi đứng yên
+        # [DYNAMIC STRIDE] Tự động xác định stride (2 hoặc 3) dựa trên độ dài dữ liệu
+        # Nếu chia hết cho 3 -> [x, y, conf]. Nếu không -> [x, y]
+        stride = 3 if len(kpts) % 3 == 0 else 2
         
-        self.cfg_core = {'min_cutoff': 0.5, 'beta': 0.1, 'd_cutoff': 1.0}
-        self.cfg_limb = {'min_cutoff': 0.5, 'beta': 0.1, 'd_cutoff': 1.0}
+        if oid not in self.object_filters:
+            self.object_filters[oid] = {}
+            
+        filters = self.object_filters[oid]
+        filtered_kpts = []
         
-        self.core_ids = [5, 6, 11, 12] # Vai trái/phải, Hông trái/phải
+        num_points = len(kpts) // stride
         
-    def filter_kpts(self, oid, t, kpts):
-        # [BYPASS] Tắt toàn bộ bộ lọc, trả về dữ liệu thô từ AI
-        return kpts
+        for i in range(num_points):
+            base = i * stride
+            
+            # Lọc tọa độ X
+            if base not in filters:
+                filters[base] = OneEuroFilter(t, kpts[base], min_cutoff=self.min_cutoff, beta=self.beta, d_cutoff=self.d_cutoff)
+            fx = filters[base](t, kpts[base])
+            
+            # Lọc tọa độ Y
+            if (base+1) not in filters:
+                filters[base+1] = OneEuroFilter(t, kpts[base+1], min_cutoff=self.min_cutoff, beta=self.beta, d_cutoff=self.d_cutoff)
+            fy = filters[base+1](t, kpts[base+1])
+            
+            filtered_kpts.extend([fx, fy])
+            
+            # Giữ nguyên Confidence Score (nếu có)
+            if stride == 3:
+                filtered_kpts.append(kpts[base+2])
+                
+        return filtered_kpts

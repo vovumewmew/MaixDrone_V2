@@ -156,7 +156,8 @@ class PoseEstimator:
                 r_status = "Phai Vuong"
             elif 70 < ang_A < 100 and 140 < ang_B < 180:
                 r_status = "Phai Ngang"
-            elif 120 < ang_A < 140 and 120 < ang_B < 180:
+            # [UPDATE] Mở rộng góc A lên 180 để bắt được tay giơ thẳng đứng
+            elif 140 < ang_C < 180:
                 r_status = "Phai Cao"
 
         # --- 3. COMBINED GESTURES (Tư thế phối hợp) ---
@@ -164,7 +165,26 @@ class PoseEstimator:
 
         # Tổng hợp trạng thái
         # [UPDATE] Ưu tiên hiển thị tư thế kết hợp, ẩn tư thế con
-        if l_status == "Trai Cao Vuong" and r_status == "Phai Cao Vuong":
+        
+        # [NEW LOGIC] Cheo Tay Tren Dau (Emergency Stop) - Hình học
+        is_crossed = False
+        if has_shoulders and kp[9][0] != 0 and kp[10][0] != 0:
+            # Mốc Y: Mũi (0) hoặc Trung điểm vai
+            ref_y = kp[0][1] if kp[0][0] != 0 else (kp[5][1] + kp[6][1])/2
+            # Check 1: Tay cao hơn đầu
+            wrists_up = kp[9][1] < ref_y and kp[10][1] < ref_y
+            # Check 2: Hai tay gần nhau
+            sho_width = dist(kp[5], kp[6])
+            
+            # [FIX] Dùng độ dài thân (Vai-Hông) làm tham chiếu phụ vì khi giơ tay vai thường bị co lại
+            torso_len = dist(kp[5], kp[11]) if kp[11][0] != 0 else 0
+            ref_len = max(sho_width, torso_len) # Lấy thước đo lớn hơn để ổn định
+            
+            wrist_dist = dist(kp[9], kp[10])
+            if wrists_up and wrist_dist < (ref_len * 0.8):
+                is_crossed = True
+
+        if is_crossed:
             status.append("Cheo Tay Tren Dau")
         elif l_status == "Trai Ngang" and r_status == "Phai Ngang":
             status.append("Hai Tay Ngang")
