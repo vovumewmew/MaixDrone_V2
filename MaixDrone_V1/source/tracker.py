@@ -77,8 +77,8 @@ class ObjectTracker:
                 old_box = old_data['box']
 
                 # [EMA SMOOTHING] Bật lại làm mượt để chống rung (Jitter)
-                # [TUNING] Tăng Alpha lên 0.7 để Box bám sát người hơn
-                alpha = 0.7
+                # [TUNING] Giảm Alpha xuống 0.3 để Box di chuyển đầm hơn, bám chắc vào người
+                alpha = 0.5
                 smooth_box = [r * alpha + o * (1 - alpha) for r, o in zip(raw_box, old_box)]
                 
                 self.objects[oid]['box'] = smooth_box

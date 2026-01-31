@@ -32,6 +32,10 @@ class HUD:
         ]
         
         self.last_print_time = time.time()
+        # [NEW] Biến để giới hạn tốc độ in log ra terminal (1s/lần)
+        self.last_action_msg = None
+        self.last_action_time = 0
+        
         self.keypoint_names = {
             0: "Nose", 1: "L-Eye", 2: "R-Eye", 3: "L-Ear", 4: "R-Ear",
             5: "L-Sho", 6: "R-Sho", 7: "L-Elb", 8: "R-Elb", 9: "L-Wri",
@@ -136,25 +140,34 @@ class HUD:
                     img.draw_circle(px, py, 2, self.C_WHITE, -1)
             
             if do_print:
-                points = obj.get('points', [])
-                stride = 3 if len(points) % 3 == 0 else 2
-                num_points = len(points) // stride
-                
-                info = []
-                for i in range(num_points):
-                    base = i * stride
-                    x = int(points[base])
-                    y = int(points[base+1])
-                    name = self.keypoint_names.get(i, str(i))
-                    info.append(f"{name}:({x},{y})")
-                print(f"ID{oid}: " + ", ".join(info))
+                # [DEBUG] Tạm ẩn toạ độ để tập trung vào thông báo hành động
+                # points = obj.get('points', [])
+                # stride = 3 if len(points) % 3 == 0 else 2
+                # num_points = len(points) // stride
+                # 
+                # info = []
+                # for i in range(num_points):
+                #     base = i * stride
+                #     x = int(points[base])
+                #     y = int(points[base+1])
+                #     name = self.keypoint_names.get(i, str(i))
+                #     info.append(f"{name}:({x},{y})")
+                # print(f"ID{oid}: " + ", ".join(info))
+                pass
         
         # [UI] Vẽ thông báo ở góc dưới màn hình (nếu có)
         if notification_msg:
             self._draw_notification(img, notification_msg)
             
-        if do_print:
-            print()
+        # [DEBUG] In thông báo trực tiếp ra terminal (Real-time) - Giới hạn 1s/lần cho cùng hành động
+        t_now = time.time()
+        if notification_msg != self.last_action_msg or (t_now - self.last_action_time > 1.0):
+            print(f"🔔 ACTION: {notification_msg}")
+            self.last_action_msg = notification_msg
+            self.last_action_time = t_now
+            
+        # if do_print:
+        #     print()
 
     def _draw_notification(self, img, text):
         """Vẽ thông báo nền trắng chữ đen ở góc dưới (Auto Wrap)"""

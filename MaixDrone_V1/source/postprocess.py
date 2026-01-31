@@ -42,8 +42,11 @@ class OneEuroFilter:
 class PoseFilter:
     def __init__(self):
         self.object_filters = {}
-        self.min_cutoff = 0.5
-        self.beta = 0.3
+        # [UPDATE] Cấu hình "Siêu Mượt" (Heavy Smoothing) để chống nhảy điểm
+        # min_cutoff = 0.1: Lọc cực mạnh khi đứng yên (khóa chặt điểm)
+        # beta = 0.1: Giảm độ nhạy để đường đi mượt mà, loại bỏ các điểm văng (Outlier)
+        self.min_cutoff = 0.2
+        self.beta = 0.2
         self.d_cutoff = 1.0
 
     def filter_kpts(self, oid, t, kpts, bbox_h=1.0):
