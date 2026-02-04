@@ -4,7 +4,7 @@ import gc
 import sys      # [NEW] Để đọc dữ liệu từ Serial (stdin)
 import select   # [NEW] Để kiểm tra dữ liệu không chặn (Non-blocking)
 import config
-from maix import display # [NEW] Chạy trực tiếp trên MaixVision
+from maix import display, image # [UPDATE] Import thêm image để load font
 from source.camera import CameraManager
 from source.ai import AIEngine
 from source.stream import StreamServer, MessageServer # [UPDATE] Import thêm MessageServer
@@ -14,6 +14,9 @@ from source.tracker import ObjectTracker
 def main():
     print("--- 🚁 MAIX DRONE V12: NETWORK MODE (LCD + SOCKET) ---")
     
+    # Dùng font mặc định (nhanh nhất)
+    image.set_default_font("sourcehansans")
+
     cam_mgr = CameraManager(config.CAM_WIDTH, config.CAM_HEIGHT)
     disp = display.Display() # [FIX] Khởi tạo đối tượng Display
     
@@ -73,6 +76,11 @@ def main():
         # Kiểm tra nếu HUD có thông báo mới thì gửi đi
         if hud.last_action_msg != last_sent_msg:
             msg_server.send(hud.last_action_msg)
+            
+            # [CAPTURE] Nếu là cảnh báo thật (không phải None), chụp và gửi ảnh ngay
+            if hud.last_action_msg is not None:
+                msg_server.send_image(img)
+                
             last_sent_msg = hud.last_action_msg
 
         # [NEW] Xử lý Lệnh từ Serial (PC gửi xuống)

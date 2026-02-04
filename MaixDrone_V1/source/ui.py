@@ -140,34 +140,32 @@ class HUD:
                     img.draw_circle(px, py, 2, self.C_WHITE, -1)
             
             if do_print:
-                # [DEBUG] Tạm ẩn toạ độ để tập trung vào thông báo hành động
-                # points = obj.get('points', [])
-                # stride = 3 if len(points) % 3 == 0 else 2
-                # num_points = len(points) // stride
-                # 
-                # info = []
-                # for i in range(num_points):
-                #     base = i * stride
-                #     x = int(points[base])
-                #     y = int(points[base+1])
-                #     name = self.keypoint_names.get(i, str(i))
-                #     info.append(f"{name}:({x},{y})")
-                # print(f"ID{oid}: " + ", ".join(info))
-                pass
+                # [DEBUG] Hiển thị lại toạ độ để debug
+                points = obj.get('points', [])
+                stride = 3 if len(points) % 3 == 0 else 2
+                num_points = len(points) // stride
+                
+                info = []
+                for i in range(num_points):
+                    base = i * stride
+                    x = int(points[base])
+                    y = int(points[base+1])
+                    name = self.keypoint_names.get(i, str(i))
+                    info.append(f"{name}:({x},{y})")
+                print(f"ID{oid}: " + ", ".join(info))
         
         # [UI] Vẽ thông báo ở góc dưới màn hình (nếu có)
         if notification_msg:
             self._draw_notification(img, notification_msg)
             
-        # [DEBUG] In thông báo trực tiếp ra terminal (Real-time) - Giới hạn 1s/lần cho cùng hành động
-        t_now = time.time()
-        if notification_msg != self.last_action_msg or (t_now - self.last_action_time > 1.0):
-            print(f"🔔 ACTION: {notification_msg}")
+        # [FIX] Cập nhật biến trạng thái để main.py biết mà gửi qua mạng
+        # (Quan trọng: Phải cập nhật biến này thì PC mới nhận được tin nhắn)
+        if notification_msg != self.last_action_msg:
             self.last_action_msg = notification_msg
-            self.last_action_time = t_now
+            # print(f"🔔 ACTION: {notification_msg}") # Uncomment dòng này nếu muốn xem log trên Drone
             
-        # if do_print:
-        #     print()
+        if do_print:
+            print()
 
     def _draw_notification(self, img, text):
         """Vẽ thông báo nền trắng chữ đen ở góc dưới (Auto Wrap)"""

@@ -10,7 +10,7 @@ class ObjectTracker:
         # Format: { object_id: {'box': [x,y,w,h], 'miss': 0} }
         self.objects = {}
         self.next_id = 1
-        self.max_miss_count = 10  # Mất dấu 10 frame mới xóa
+        self.max_miss_count = 30  # [UPDATE] Tăng lên 30 frame (1s) để chịu được vật cản che khuất
         self.dist_threshold = 100 # Khoảng cách tối đa để coi là cùng 1 người (pixel)
         self.filter = PoseFilter() # [FIX] Khởi tạo bộ lọc
 
@@ -63,7 +63,12 @@ class ObjectTracker:
                 if used_input[j]: continue
                 
                 dist = math.sqrt((old_cx - new_cx)**2 + (old_cy - new_cy)**2)
-                if dist < min_dist and dist < self.dist_threshold:
+                # [DYNAMIC] Ngưỡng theo kích thước box (tránh nhầm ID khi xa/gần)
+                dynamic_th = self.dist_threshold
+                if i < len(object_ids):
+                    obox = self.objects[object_ids[i]]['box']
+                    dynamic_th = max(60, min(200, 0.6 * max(obox[2], obox[3])))
+                if dist < min_dist and dist < dynamic_th:
                     min_dist = dist
                     best_match_idx = j
             
@@ -76,13 +81,32 @@ class ObjectTracker:
                 old_data = self.objects[oid]
                 old_box = old_data['box']
 
-                # [EMA SMOOTHING] Bật lại làm mượt để chống rung (Jitter)
-                # [TUNING] Giảm Alpha xuống 0.3 để Box di chuyển đầm hơn, bám chắc vào người
-                alpha = 0.5
+                # [EMA SMOOTHING] Adaptive Alpha (Làm mượt thích ứng)
+                # Tính khoảng cách di chuyển của tâm Box so với frame trước
+                center_dist = math.sqrt(((raw_box[0]+raw_box[2]/2) - (old_box[0]+old_box[2]/2))**2 + 
+                                      ((raw_box[1]+raw_box[3]/2) - (old_box[1]+old_box[3]/2))**2)
+                
+                # Logic: 
+                # - Đứng yên (dist < 3px): Alpha cực nhỏ (0.05) -> Khóa cứng, chống rung tuyệt đối
+                # - Di chuyển (> 3px): Alpha tăng dần lên 0.4 -> Bám sát chuyển động
+                # - Di chuyển nhanh (> 20px): Alpha = 0.5 -> Phản hồi tức thì
+                alpha = 0.05 if center_dist < 3.0 else min(0.5, 0.05 + (center_dist / 20.0) * 0.45)
+                
                 smooth_box = [r * alpha + o * (1 - alpha) for r, o in zip(raw_box, old_box)]
                 
+                # [UPDATE] Tính vận tốc để dự đoán hướng đi khi bị che khuất
+                dt = t_now - old_data['last_time']
+                if dt > 0:
+                    vx = (smooth_box[0] - old_box[0]) / dt
+                    vy = (smooth_box[1] - old_box[1]) / dt
+                    old_vel = old_data.get('velocity', [0,0,0,0])
+                    # Lọc mạnh (alpha nhỏ) để tránh nhiễu do rung lắc ở xa
+                    v_alpha = 0.2
+                    svx = vx * v_alpha + old_vel[0] * (1 - v_alpha)
+                    svy = vy * v_alpha + old_vel[1] * (1 - v_alpha)
+                    self.objects[oid]['velocity'] = [svx, svy, 0, 0]
+                
                 self.objects[oid]['box'] = smooth_box
-                self.objects[oid]['velocity'] = [0,0,0,0] # Reset velocity, không dùng nữa
                 self.objects[oid]['prev_raw_box'] = raw_box
                 self.objects[oid]['last_time'] = t_now
                 
@@ -91,18 +115,23 @@ class ObjectTracker:
                 
                 old_points = self.objects[oid].get('points', [])
                 
-                filtered_points = self.filter.filter_kpts(oid, t_now, raw_points)
+                # [ROBUST] Nếu điểm trống/yếu -> giữ điểm cũ vài frame
+                if not raw_points:
+                    filtered_points = self.objects[oid].get('points', [])
+                else:
+                    filtered_points = self.filter.filter_kpts(oid, t_now, raw_points, bbox=smooth_box)
 
                 self.objects[oid]['points'] = filtered_points
                 
                 # [METRIC ADVANCED] Tính điểm chất lượng dựa trên OKS & MPJPE (Proxy)
                 # So sánh độ lệch giữa Raw và Filtered để đánh giá độ ổn định
                 # [UPDATE] Truyền thêm chiều cao (h) để chuẩn hóa Jitter theo kích thước người
-                pose_score = self._calculate_quality(raw_points, filtered_points, res['score'], res['h'])
+                pose_score = self._calculate_quality(raw_points, filtered_points, res['score'], smooth_box[3])
                 self.objects[oid]['pose_score'] = pose_score
                 
-                # [GESTURE] Phân tích cử chỉ
-                gestures = self.objects[oid]['estimator'].update(filtered_points)
+                # [GESTURE] Phân tích cử chỉ bằng RAW POINTS (để lấy độ tin cậy gốc)
+                # Filtered points chỉ dùng để vẽ cho mượt, còn logic cần biết AI chắc chắn đến đâu
+                gestures = self.objects[oid]['estimator'].update(raw_points)
                 self.objects[oid]['gestures'] = gestures
                 
                 self.objects[oid]['score'] = res['score']
@@ -228,7 +257,12 @@ class ObjectTracker:
         # [VISIBILITY] Tỷ lệ số điểm nhìn thấy trên tổng số điểm quan trọng
         visibility = count / len(target_indices)
 
-    
-        final_score = det_score * (0.45 * avg_conf + 0.35 * stability_score + 0.20 * visibility)
+        # [DISTANCE FIX] Nếu vật thể nhỏ (xa, cao < 100px), ưu tiên độ ổn định hơn độ tin cậy
+        if bbox_height < 100:
+            # Giảm trọng số avg_conf (vì xa AI nhìn mờ), tăng stability
+            final_score = det_score * (0.30 * avg_conf + 0.50 * stability_score + 0.20 * visibility)
+        else:
+            # Công thức chuẩn cho cự ly gần/trung bình
+            final_score = det_score * (0.45 * avg_conf + 0.35 * stability_score + 0.20 * visibility)
         
         return final_score

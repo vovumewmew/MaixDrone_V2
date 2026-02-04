@@ -15,11 +15,11 @@ class AIEngine:
             
             # [AUTO-DETECT] Tự động chọn class phù hợp với phiên bản YOLO
             path_lower = self.model_path.lower()
-            if "yolov5" in path_lower:
-                self.model = nn.YOLOv5(self.model_path, dual_buff=True)
-            elif "yolov8" in path_lower:
+            # [UPDATE] Loại bỏ YOLOv5, tập trung vào YOLO11. YOLOv8 là phụ.
+            if "yolov8" in path_lower:
                 self.model = nn.YOLOv8(self.model_path, dual_buff=True)
             else:
+                # Mặc định là YOLO11 (cho cả yolo11n, yolo11s...)
                 self.model = nn.YOLO11(self.model_path, dual_buff=True)
             
             # [NEW] Tự động lấy kích thước input từ Model
@@ -65,11 +65,8 @@ class AIEngine:
             # [FIX] Thêm keypoint_th để NPU không lọc bỏ điểm xương quá sớm
             # Dùng config.KEYPOINT_THRESHOLD (0.15) để bắt được cả điểm mờ
             
-            # [COMPATIBILITY] YOLOv5 trong SDK không hỗ trợ tham số keypoint_th
-            if isinstance(self.model, nn.YOLOv5):
-                objs = self.model.detect(img_input, conf_th=self.threshold, iou_th=0.45)
-            else:
-                objs = self.model.detect(img_input, conf_th=self.threshold, iou_th=0.45, keypoint_th=config.KEYPOINT_THRESHOLD)
+            # [UPDATE] Đã loại bỏ YOLOv5, nên luôn gọi hàm detect chuẩn của YOLO11/8
+            objs = self.model.detect(img_input, conf_th=self.threshold, iou_th=0.45, keypoint_th=config.KEYPOINT_THRESHOLD)
             
             for obj in objs:
                 # Map Box gốc từ YOLO

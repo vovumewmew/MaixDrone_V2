@@ -1,19 +1,17 @@
 import math
+import time
+from collections import Counter # [NEW] Dùng để bỏ phiếu
 
 class PoseEstimator:
     def __init__(self, history_size=5):
         self.history = []
         self.history_size = history_size
+        self.gesture_buffer = [] # [NEW] Bộ nhớ đệm để chống rung cử chỉ
+        self.BUFFER_SIZE = 8     # Cần ổn định trong 8 frame (~0.3s) mới chốt
         
-        # [NEW] Biến theo dõi cử chỉ Vẫy Tay Phải (Wave Right)
-        self.wave_r_cnt = 0       # Đếm số lần đổi hướng (lắc tay)
-        self.wave_r_prev_x = 0    # Lưu vị trí X cũ để so sánh
-        self.wave_r_prev_y = 0    # [NEW] Lưu vị trí Y cũ để kiểm tra chuyển động dọc
-        
-        # [NEW] Biến theo dõi cử chỉ Vẫy Tay Trái (Wave Left)
-        self.wave_l_cnt = 0
-        self.wave_l_prev_x = 0
-        self.wave_l_prev_y = 0
+        # [WAVE DYNAMIC] Lịch sử vector tương đối (Cổ tay - Khuỷu tay) cho tay phải
+        self.rw_wave_hist = []
+        self.WAVE_LEN = 20       # Cửa sổ xét dao động (~0.6s)
 
     def update(self, keypoints):
         """
@@ -22,10 +20,24 @@ class PoseEstimator:
         """
         if not keypoints or len(keypoints) < 17 * 3: return []
         
-        # 1. Parse Keypoints (x, y)
+        # 1. Parse Keypoints (x, y, conf)
         current_kpts = []
+        current_confs = [] # [NEW] Lưu độ tin cậy
         for i in range(0, len(keypoints), 3):
             current_kpts.append((keypoints[i], keypoints[i+1]))
+            current_confs.append(keypoints[i+2])
+            
+        # [WAVE DYNAMIC] Cập nhật dữ liệu thô (Raw Data)
+        # Tính chênh lệch X giữa Cổ tay phải (10) và Khuỷu tay phải (8)
+        # Index trong list phẳng: Elbow=24, Wrist=30
+        val = None
+        if len(keypoints) >= 33:
+            if keypoints[26] > 0.4 and keypoints[32] > 0.4: # Conf > 0.4
+                val = keypoints[30] - keypoints[24] # Delta X
+        
+        self.rw_wave_hist.append(val)
+        if len(self.rw_wave_hist) > self.WAVE_LEN:
+            self.rw_wave_hist.pop(0)
             
         # 2. Smooth Keypoints (Moving Average)
         self.history.append(current_kpts)
@@ -39,9 +51,32 @@ class PoseEstimator:
             n = len(self.history)
             avg_kpts.append((sx/n, sy/n))
 
-        return self._analyze(avg_kpts)
+        # 3. Phân tích cử chỉ (kèm độ tin cậy)
+        raw_gestures = self._analyze(avg_kpts, current_confs)
+        
+        # 4. [SMART] Cơ chế Bỏ phiếu (Voting)
+        # Chỉ trả về cử chỉ nếu nó xuất hiện liên tục (ổn định)
+        if raw_gestures:
+            self.gesture_buffer.append(tuple(sorted(raw_gestures))) # Lưu dưới dạng tuple để hash được
+        else:
+            self.gesture_buffer.append(None)
+            
+        if len(self.gesture_buffer) > self.BUFFER_SIZE:
+            self.gesture_buffer.pop(0)
+            
+        # Đếm tần suất xuất hiện trong buffer
+        valid_gestures = [g for g in self.gesture_buffer if g is not None]
+        if not valid_gestures: return []
+        
+        most_common, count = Counter(valid_gestures).most_common(1)[0]
+        
+        # Ngưỡng chấp nhận: Phải xuất hiện > 60% trong buffer
+        if count > (self.BUFFER_SIZE * 0.6):
+            return list(most_common)
+        else:
+            return []
 
-    def _analyze(self, kp):
+    def _analyze(self, kp, confs):
         # Helper: Vector Math
         def vec(p1, p2): return (p2[0] - p1[0], p2[1] - p1[1])
         def dot(v1, v2): return v1[0]*v2[0] + v1[1]*v2[1]
@@ -54,11 +89,25 @@ class PoseEstimator:
         
         status = []
         UP = (0, -1)
+        
+        # [SMART] Ngưỡng tin cậy tối thiểu để tính toán góc (tránh rác)
+        MIN_CONF = 0.35
 
         # [SAFETY] Kiểm tra nếu thiếu các điểm quan trọng (Vai hoặc Hông)
         # Nếu thiếu Hông (11, 12) -> Không thể tính Spine -> Bỏ qua Body State
-        has_hips = (kp[11][0] != 0 and kp[12][0] != 0)
-        has_shoulders = (kp[5][0] != 0 and kp[6][0] != 0)
+        has_hips = (confs[11] > MIN_CONF and confs[12] > MIN_CONF)
+        has_shoulders = (confs[5] > MIN_CONF and confs[6] > MIN_CONF)
+
+        # [SCALE] Chuẩn hoá theo kích thước cơ thể để ổn định mọi khoảng cách
+        if has_hips and has_shoulders:
+            mid_sho = ((kp[5][0]+kp[6][0])/2, (kp[5][1]+kp[6][1])/2)
+            mid_hip = ((kp[11][0]+kp[12][0])/2, (kp[11][1]+kp[12][1])/2)
+            torso_len = dist(mid_sho, mid_hip)
+        elif has_shoulders:
+            torso_len = dist(kp[5], kp[6])
+        else:
+            torso_len = 1.0
+        if torso_len < 1.0: torso_len = 1.0
 
         # --- 1. BODY STATE (Standing/Sitting/Lying) ---
         # Spine Vector (Mid-Hip to Mid-Shoulder)
@@ -115,7 +164,8 @@ class PoseEstimator:
 
         # --- TAY TRÁI (Left Arm) ---
         # Cần: Vai(5), Khuỷu(7), Cổ tay(9)
-        if kp[5][0] != 0 and kp[7][0] != 0 and kp[9][0] != 0:
+        # [SMART] Chỉ tính nếu AI nhìn rõ cả 3 khớp
+        if confs[5] > MIN_CONF and confs[7] > MIN_CONF and confs[9] > MIN_CONF:
             # Góc A: Thân dưới vs Vai->Khuỷu
             v_sho_elb = vec(kp[5], kp[7])
             ang_A = abs(angle(spine_down, v_sho_elb))
@@ -127,60 +177,25 @@ class PoseEstimator:
             
             # [NEW] Góc C: Vai->Hông vs Vai->Cổ tay
             ang_C = 0
-            if kp[11][0] != 0:
+            if confs[11] > MIN_CONF:
                 v_sho_hip = vec(kp[5], kp[11])
                 v_sho_wri = vec(kp[5], kp[9])
                 ang_C = abs(angle(v_sho_hip, v_sho_wri))
             
+            wrist_up = (kp[9][1] < kp[5][1] - 0.2 * torso_len)
             if 140 < ang_A < 180 and 75 < ang_B < 90:
                 l_status = "Trai Cao Vuong"
             elif 70 < ang_A < 100 and 60 < ang_B < 100:
                 l_status = "Trai Vuong"
             elif 70 < ang_A < 100 and 140 < ang_B < 180:
                 l_status = "Trai Ngang"
-            elif 150 < ang_C < 180:
+            elif 150 < ang_C < 180 and wrist_up:
                 l_status = "Trai Cao"
-            
-            # [NEW LOGIC] Vay Tay Trai (Wave Left) - Đối xứng với tay phải
-            if 30 < ang_A < 130:
-                curr_x = kp[9][0]
-                curr_y = kp[9][1]
-                
-                if self.wave_l_prev_x == 0: 
-                    self.wave_l_prev_x = curr_x
-                    self.wave_l_prev_y = curr_y
-                
-                # Dùng chiều rộng vai làm thước đo chuẩn
-                sho_w = dist(kp[5], kp[6])
-                if sho_w == 0: sho_w = 50
-                
-                dx = curr_x - self.wave_l_prev_x
-                dy = curr_y - self.wave_l_prev_y
-                
-                is_vertical_move = abs(dy) > abs(dx) * 4.0
-                # [STRICT] Tăng ngưỡng rung lên 6% vai để tránh bắt nhầm khi tay tĩnh
-                move_thresh = sho_w * 0.06
-                
-                if abs(dx) > move_thresh and not is_vertical_move:
-                    self.wave_l_cnt += 2
-                    self.wave_l_prev_x = curr_x
-                    self.wave_l_prev_y = curr_y
-                else:
-                    # [UPDATE] Decay chậm lại (-1) để giữ trạng thái lâu hơn
-                    self.wave_l_cnt = max(0, self.wave_l_cnt - 1)
-            else:
-                self.wave_l_cnt = 0
-                self.wave_l_prev_x = 0
-                self.wave_l_prev_y = 0
-            
-            if self.wave_l_cnt >= 6:
-                l_status = "Vay Tay Trai"
-                # [UPDATE] Tăng bộ đệm lên 60 (khoảng 2s) để khớp với thời gian đọc
-                if self.wave_l_cnt > 60: self.wave_l_cnt = 60
 
         # --- TAY PHẢI (Right Arm) ---
         # Cần: Vai(6), Khuỷu(8), Cổ tay(10)
-        if kp[6][0] != 0 and kp[8][0] != 0 and kp[10][0] != 0:
+        # [SMART] Chỉ tính nếu AI nhìn rõ cả 3 khớp
+        if confs[6] > MIN_CONF and confs[8] > MIN_CONF and confs[10] > MIN_CONF:
             # Góc A: Thân dưới vs Vai->Khuỷu
             v_sho_elb = vec(kp[6], kp[8])
             ang_A = abs(angle(spine_down, v_sho_elb))
@@ -192,11 +207,12 @@ class PoseEstimator:
             
             # [NEW] Góc C: Vai->Hông vs Vai->Cổ tay
             ang_C = 0
-            if kp[12][0] != 0:
+            if confs[12] > MIN_CONF:
                 v_sho_hip = vec(kp[6], kp[12])
                 v_sho_wri = vec(kp[6], kp[10])
                 ang_C = abs(angle(v_sho_hip, v_sho_wri))
             
+            wrist_up = (kp[10][1] < kp[6][1] - 0.2 * torso_len)
             if 140 < ang_A < 180 and 75 < ang_B < 90:
                 r_status = "Phai Cao Vuong"
             elif 70 < ang_A < 100 and 60 < ang_B < 100:
@@ -204,57 +220,8 @@ class PoseEstimator:
             elif 70 < ang_A < 100 and 140 < ang_B < 180:
                 r_status = "Phai Ngang"
             # [UPDATE] Mở rộng góc A lên 180 để bắt được tay giơ thẳng đứng
-            elif 150 < ang_C < 180:
+            elif 150 < ang_C < 180 and wrist_up:
                 r_status = "Phai Cao"
-                
-            # [NEW LOGIC] Vay Tay Phai (Wave Right)
-            # Điều kiện 1: Góc nách (A) mở rộng tối đa (30; 160) để bắt mọi tầm vẫy (thấp/cao)
-            
-            # [FIX] Bỏ chặn "is_static_high" để ưu tiên Vẫy Tay nếu có chuyển động ngang mạnh
-            # is_static_high = (r_status == "Phai Cao" or r_status == "Phai Cao Vuong")
-            
-            if 30 < ang_A < 130:
-                curr_x = kp[10][0]
-                curr_y = kp[10][1] # [NEW]
-                
-                if self.wave_r_prev_x == 0: 
-                    self.wave_r_prev_x = curr_x
-                    self.wave_r_prev_y = curr_y
-                
-                # Dùng chiều rộng vai làm thước đo chuẩn
-                sho_w = dist(kp[5], kp[6])
-                if sho_w == 0: sho_w = 50 # Fallback an toàn
-                
-                # Tính độ di chuyển của cổ tay
-                dx = curr_x - self.wave_r_prev_x
-                dy = curr_y - self.wave_r_prev_y # [NEW]
-                
-                # [RELAX] Nới lỏng tối đa: Chỉ bỏ qua nếu chuyển động dọc quá áp đảo (gấp 4 lần ngang)
-                is_vertical_move = abs(dy) > abs(dx) * 4.0
-                
-                # [STRICT] Tăng ngưỡng rung lên 6% vai để tránh bắt nhầm khi tay tĩnh
-                move_thresh = sho_w * 0.06
-                
-                # [LOGIC] Nạp năng lượng nếu có chuyển động ngang
-                if abs(dx) > move_thresh and not is_vertical_move:
-                    # [UPDATE] Tăng tốc tích lũy: +2 điểm mỗi lần di chuyển (Nạp Nhanh)
-                    self.wave_r_cnt += 2
-                    self.wave_r_prev_x = curr_x # Cập nhật vị trí mới
-                    self.wave_r_prev_y = curr_y
-                else:
-                    # [UPDATE] Decay chậm lại (-1) để giữ trạng thái lâu hơn
-                    self.wave_r_cnt = max(0, self.wave_r_cnt - 1)
-            else:
-                # Reset nếu tay hạ xuống hoặc không đúng tư thế
-                self.wave_r_cnt = 0
-                self.wave_r_prev_x = 0
-                self.wave_r_prev_y = 0
-            
-            # Điều kiện 2: Tích lũy đủ 6 điểm
-            if self.wave_r_cnt >= 6:
-                r_status = "Vay Tay Phai"
-                # [UPDATE] Tăng bộ đệm lên 60 (khoảng 2s) để khớp với thời gian đọc
-                if self.wave_r_cnt > 60: self.wave_r_cnt = 60
 
         # --- 3. COMBINED GESTURES (Tư thế phối hợp) ---
         # Logic mới: Kết hợp từ trạng thái đơn lẻ "Cao Vuong"
@@ -264,7 +231,8 @@ class PoseEstimator:
         
         # [NEW LOGIC] Cheo Tay Tren Dau (Emergency Stop) - Hình học
         is_crossed = False
-        if has_shoulders and kp[9][0] != 0 and kp[10][0] != 0:
+        # [SMART] Yêu cầu độ tin cậy cao hơn cho hành động quan trọng này
+        if has_shoulders and confs[9] > 0.4 and confs[10] > 0.4:
             # Mốc Y: Mũi (0) hoặc Trung điểm vai
             ref_y = kp[0][1] if kp[0][0] != 0 else (kp[5][1] + kp[6][1])/2
             # Check 1: Tay cao hơn đầu
@@ -282,12 +250,42 @@ class PoseEstimator:
 
         if is_crossed:
             status.append("Cheo Tay Tren Dau")
-        elif l_status == "Trai Ngang" and r_status == "Phai Ngang":
-            status.append("Hai Tay Ngang")
-        elif l_status == "Trai Cao" and r_status == "Phai Cao":
-            status.append("Tay Chu V")
         else:
-            if l_status: status.append(l_status)
-            if r_status: status.append(r_status)
+            # --- [NEW] DYNAMIC WAVE LOGIC (User Request) ---
+            # Xét dao động của vector Cổ tay - Khuỷu tay (Biên độ > 15px, Đổi chiều >= 2 lần)
+            def check_right_wave_dynamic():
+                data = [x for x in self.rw_wave_hist if x is not None]
+                if len(data) < 10: return False # Cần ít nhất 10 frame dữ liệu
+                
+                # 1. Check Biên độ (15px)
+                amp = max(data) - min(data)
+                if amp < 20: return False
+                
+                # 2. Check Số lần đổi chiều (Oscillation)
+                changes = 0
+                last_dir = 0
+                for i in range(1, len(data)):
+                    diff = data[i] - data[i-1]
+                    if abs(diff) < 10: continue # Lọc nhiễu nhỏ (<3px coi như đứng yên)
+                    curr_dir = 1 if diff > 0 else -1
+                    if last_dir != 0 and curr_dir != last_dir:
+                        changes += 1
+                    last_dir = curr_dir
+                
+                return changes >= 3
+
+            # Ưu tiên logic động này cho tay phải (Ghi đè logic tĩnh)
+            if check_right_wave_dynamic():
+                # Vẫn cần điều kiện: Cổ tay cao hơn Khuỷu tay (để tránh lúc đi bộ đánh tay thấp)
+                if kp[10][1] < kp[8][1]:
+                    r_status = "Vay Tay Phai"
+
+            if l_status == "Trai Ngang" and r_status == "Phai Ngang":
+                status.append("Hai Tay Ngang")
+            elif l_status == "Trai Cao" and r_status == "Phai Cao":
+                status.append("Tay Chu V")
+            else:
+                if l_status: status.append(l_status)
+                if r_status: status.append(r_status)
         
         return status

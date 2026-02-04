@@ -2,6 +2,7 @@
 import socket
 import time
 import select # [NEW] Dùng để kiểm tra kết nối không chặn (Non-blocking)
+import binascii # [NEW] Để mã hóa ảnh sang text (Base64)
 
 class StreamServer:
     def __init__(self, host, port, timeout):
@@ -164,3 +165,24 @@ class MessageServer:
         except:
             print("👋 Máy tính đã ngắt kết nối tin nhắn.")
             self.client = None
+
+    def send_image(self, img_obj):
+        """[NEW] Mã hóa ảnh thành Base64 và gửi đi như tin nhắn text"""
+        if not self.client: return
+        try:
+            # 1. Nén ảnh thành JPEG (Quality 80 để nhẹ)
+            # to_jpeg trả về đối tượng Bytes
+            jpg_bytes = img_obj.to_jpeg(quality=80).to_bytes()
+            
+            # 2. Mã hóa sang Base64 (để gửi qua socket text an toàn)
+            # b2a_base64 trả về bytes có kèm \n ở cuối
+            b64_bytes = binascii.b2a_base64(jpg_bytes)
+            b64_str = b64_bytes.decode('utf-8').strip()
+            
+            # 3. Gửi với tiền tố IMG:
+            # Format: IMG:<base64_string>\n
+            msg = f"IMG:{b64_str}\n"
+            self.client.sendall(msg.encode('utf-8'))
+            # print(f"📸 Đã gửi ảnh ({len(msg)} bytes)")
+        except Exception as e:
+            print(f"⚠️ Lỗi gửi ảnh: {e}")
