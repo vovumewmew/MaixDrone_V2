@@ -13,6 +13,7 @@ from source.tracker import ObjectTracker
 
 def main():
     print("--- 🚁 MAIX DRONE V12: NETWORK MODE (LCD + SOCKET) ---")
+    print("⚡ MODE: REAL-TIME FULL PROCESSING (EVERY FRAME)")
     
     # Dùng font mặc định (nhanh nhất)
     image.set_default_font("sourcehansans")
@@ -33,7 +34,9 @@ def main():
     streamer.start() # [UPDATE] Bắt đầu lắng nghe kết nối Web
     msg_server.start() # [NEW] Bắt đầu lắng nghe máy tính
     
-    SKIP_FRAMES = 3
+    # [TEST PERFORMANCE] Chuyển sang chế độ xử lý toàn vẹn (Full AI)
+    # SKIP_FRAMES = 0 nghĩa là không bỏ frame nào, chạy AI liên tục
+    SKIP_FRAMES = 0
     
     if config.ENABLE_AI:
         if not ai_engine.load():
@@ -57,11 +60,10 @@ def main():
         t_last = t_now
 
         if config.ENABLE_AI:
-            if frame_cnt % (SKIP_FRAMES + 1) == 0:
-                _, ai_results = ai_engine.process(img)
-                current_results = tracker.update(ai_results)
-            else:
-                current_results = tracker.predict()
+            # [FULL PROCESSING] Chạy AI trên mọi khung hình
+            # Loại bỏ hoàn toàn logic dự đoán (Hybrid) để đảm bảo dữ liệu thực tế nhất
+            _, ai_results = ai_engine.process(img)
+            current_results = tracker.update(ai_results)
 
         hud.draw_fps(img, fps_show)
         if config.ENABLE_AI:

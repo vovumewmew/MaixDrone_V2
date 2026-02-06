@@ -44,9 +44,9 @@ class PoseFilter:
         self.object_filters = {}
         # [UPDATE] Cấu hình "Siêu Mượt" (Heavy Smoothing) để chống nhảy điểm
         # [NOISE REDUCTION] Giảm mạnh các thông số để ưu tiên độ ổn định (chấp nhận trễ nhẹ)
-        self.min_cutoff = 0.004 # [TUNING] Rất nhỏ (0.004) để khử rung triệt để khi đứng yên
-        self.beta = 0.05        # [TUNING] Nhỏ (0.05) để chuyển động đầm, không bị giật
-        self.d_cutoff = 1.0
+        self.min_cutoff = 0.002 # [TUNING] Giảm tiếp xuống 0.002 để "khóa cứng" điểm khi đứng yên
+        self.beta = 0.08        # [TUNING] Tăng nhẹ lên 0.08 để giảm độ trễ khi di chuyển
+        self.d_cutoff = 0.5     # [TUNING] Giảm d_cutoff để làm mượt vận tốc, tránh giật cục
 
     def filter_kpts(self, oid, t, kpts, bbox=None):
         if not kpts: return []
@@ -61,14 +61,14 @@ class PoseFilter:
             bbox_h = max(1.0, float(bbox[3]))
 
         if bbox_h < 100:
-            min_cutoff = 0.002 # [XA] Khóa cứng điểm khi ở xa
+            min_cutoff = 0.001 # [XA] Cực kỳ ổn định (gần như không rung)
             beta = 0.02        # [XA] Rất đầm
         elif bbox_h < 200:
-            min_cutoff = 0.005
-            beta = 0.05
+            min_cutoff = 0.003
+            beta = 0.08        # [TRUNG BÌNH] Cân bằng
         else:
-            min_cutoff = 0.01
-            beta = 0.1 # [GAN] Giảm beta xuống 0.1 (trước là 0.4) để tay không bị văng khi múa
+            min_cutoff = 0.005
+            beta = 0.2 # [GAN] Tăng độ nhạy lên 0.2 để bắt kịp tay khi múa nhanh (giảm lag)
         
         if oid not in self.object_filters:
             self.object_filters[oid] = {}
