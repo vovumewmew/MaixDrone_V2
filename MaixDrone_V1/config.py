@@ -5,6 +5,14 @@ HOST = "0.0.0.0"
 PORT = 80
 TIMEOUT = 3.0
 
+# --- CẤU HÌNH WIFI (Sửa Wifi tại đây) ---
+WIFI_SSID = "HUTECH STAFF"
+WIFI_PASS = "staff@@hutech"
+
+# --- CẤU HÌNH TINKERBOARD ---
+TINKER_IP = "10.60.4.175" # [SỬA LẠI] IP của Tinkerboard trong mạng Wifi Lab
+TINKER_PORT = 9999          # Port mà Tinkerboard đang lắng nghe
+
 # --- CẤU HÌNH CAMERA (CHẾ ĐỘ HD) ---
 CAM_WIDTH = 320     # Chiều rộng (Width)
 CAM_HEIGHT = 240    # Chiều cao (Height)

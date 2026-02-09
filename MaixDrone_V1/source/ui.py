@@ -139,20 +139,21 @@ class HUD:
                 for px, py in joints.values():
                     img.draw_circle(px, py, 2, self.C_WHITE, -1)
             
-            if do_print:
-                # [DEBUG] Hiển thị lại toạ độ để debug
-                points = obj.get('points', [])
-                stride = 3 if len(points) % 3 == 0 else 2
-                num_points = len(points) // stride
+            # [UPDATE] Ẩn phần in toạ độ điểm theo yêu cầu
+            # if do_print:
+            #     # [DEBUG] Hiển thị lại toạ độ để debug
+            #     points = obj.get('points', [])
+            #     stride = 3 if len(points) % 3 == 0 else 2
+            #     num_points = len(points) // stride
                 
-                info = []
-                for i in range(num_points):
-                    base = i * stride
-                    x = int(points[base])
-                    y = int(points[base+1])
-                    name = self.keypoint_names.get(i, str(i))
-                    info.append(f"{name}:({x},{y})")
-                print(f"ID{oid}: " + ", ".join(info))
+            #     info = []
+            #     for i in range(num_points):
+            #         base = i * stride
+            #         x = int(points[base])
+            #         y = int(points[base+1])
+            #         name = self.keypoint_names.get(i, str(i))
+            #         info.append(f"{name}:({x},{y})")
+            #     print(f"ID{oid}: " + ", ".join(info))
         
         # [UI] Vẽ thông báo ở góc dưới màn hình (nếu có)
         if notification_msg:

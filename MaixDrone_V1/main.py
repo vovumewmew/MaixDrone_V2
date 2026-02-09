@@ -1,6 +1,7 @@
 # main.py
 import time
 import gc
+import os       # [NEW] Để chạy lệnh hệ thống (Wifi)
 import sys      # [NEW] Để đọc dữ liệu từ Serial (stdin)
 import select   # [NEW] Để kiểm tra dữ liệu không chặn (Non-blocking)
 import config
@@ -10,10 +11,40 @@ from source.ai import AIEngine
 from source.stream import StreamServer, MessageServer # [UPDATE] Import thêm MessageServer
 from source.ui import HUD
 from source.tracker import ObjectTracker
+from source.tinker_client import TinkerClient # [NEW] Import Client gửi tin
+
+def connect_wifi_linux(ssid, password):
+    """Hàm tự động kết nối Wifi cho Linux nhúng (MaixCam)"""
+    # [OPTIMIZE] Kiểm tra nhanh: Nếu đã có IP thì không cần kết nối lại (tiết kiệm 5s khởi động)
+    try:
+        # ifconfig wlan0 thường chứa dòng "inet addr:10.x.x.x" hoặc "inet 10.x.x.x"
+        if_status = os.popen("ifconfig wlan0").read()
+        if "inet " in if_status:
+            print(f"✅ Wifi đã có IP (Sẵn sàng). Bỏ qua bước kết nối lại.")
+            return
+    except Exception:
+        pass # Nếu lỗi thì cứ chạy kết nối bình thường
+
+    print(f"📶 Auto Connecting to Wifi: {ssid}...")
+    # 1. Tạo file cấu hình
+    conf_content = f'ctrl_interface=/var/run/wpa_supplicant\nupdate_config=1\n\nnetwork={{\n    ssid="{ssid}"\n    psk="{password}"\n}}\n'
+    os.system(f"echo '{conf_content}' > /etc/wpa_supplicant.conf")
+    
+    # 2. Khởi động lại tiến trình Wifi
+    os.system("killall wpa_supplicant 2> /dev/null")
+    os.system("ifconfig wlan0 down && ifconfig wlan0 up")
+    time.sleep(1)
+    os.system("wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant.conf")
+    time.sleep(2) # Chờ kết nối
+    os.system("udhcpc -i wlan0") # Xin IP
+    print("✅ Wifi setup done.")
 
 def main():
     print("--- 🚁 MAIX DRONE V12: NETWORK MODE (LCD + SOCKET) ---")
     print("⚡ MODE: REAL-TIME FULL PROCESSING (EVERY FRAME)")
+    
+    # [AUTO WIFI] Tự động kết nối mạng Lab khi chạy chương trình
+    connect_wifi_linux(config.WIFI_SSID, config.WIFI_PASS)
     
     # Dùng font mặc định (nhanh nhất)
     image.set_default_font("sourcehansans")
@@ -25,6 +56,9 @@ def main():
     streamer = StreamServer(config.HOST, config.PORT, config.TIMEOUT)
     # [NEW] Khởi tạo Server tin nhắn (Port 8888)
     msg_server = MessageServer(8888)
+    
+    # [NEW] Khởi tạo Client gửi dữ liệu sang Tinkerboard
+    tinker_client = TinkerClient(config.TINKER_IP, config.TINKER_PORT)
     
     ai_engine = AIEngine(config.MODEL_PATH, config.CONF_THRESHOLD)
     hud = HUD(config.CAM_WIDTH, config.CAM_HEIGHT)
@@ -64,6 +98,9 @@ def main():
             # Loại bỏ hoàn toàn logic dự đoán (Hybrid) để đảm bảo dữ liệu thực tế nhất
             _, ai_results = ai_engine.process(img)
             current_results = tracker.update(ai_results)
+            
+            # [NEW] Gửi dữ liệu Pose sang Tinkerboard
+            tinker_client.send_pose(current_results)
 
         hud.draw_fps(img, fps_show)
         if config.ENABLE_AI:
