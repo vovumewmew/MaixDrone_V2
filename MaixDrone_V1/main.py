@@ -58,7 +58,9 @@ def main():
     msg_server = MessageServer(8888)
     
     # [NEW] Khởi tạo Client gửi dữ liệu sang Tinkerboard
-    tinker_client = TinkerClient(config.TINKER_IP, config.TINKER_PORT)
+    tinker_client = None
+    if config.ENABLE_TINKER:
+        tinker_client = TinkerClient(config.TINKER_IP, config.TINKER_PORT)
     
     ai_engine = AIEngine(config.MODEL_PATH, config.CONF_THRESHOLD)
     hud = HUD(config.CAM_WIDTH, config.CAM_HEIGHT)
@@ -100,7 +102,8 @@ def main():
             current_results = tracker.update(ai_results)
             
             # [NEW] Gửi dữ liệu Pose sang Tinkerboard
-            tinker_client.send_pose(current_results)
+            if config.ENABLE_TINKER and tinker_client:
+                tinker_client.send_pose(current_results)
 
         hud.draw_fps(img, fps_show)
         if config.ENABLE_AI:

@@ -68,7 +68,8 @@ class PoseFilter:
             beta = 0.05
         else:
             min_cutoff = 0.01
-            beta = 0.1 # [GAN] Giảm beta xuống 0.1 (trước là 0.4) để tay không bị văng khi múa
+            # [FIX LAG] Tăng beta từ 0.1 lên 0.4 để tay bám sát chuyển động nhanh (giảm hiện tượng níu)
+            beta = 0.4 
         
         if oid not in self.object_filters:
             self.object_filters[oid] = {}
@@ -131,52 +132,4 @@ class PoseFilter:
             if stride == 3:
                 filtered_kpts.append(conf)
                 
-        # [ANATOMY] Áp dụng ràng buộc giải phẫu học (Chống tay dài/ngắn bất thường)
-        self._apply_anatomy_constraints(filtered_kpts, stride)
-        
         return filtered_kpts
-
-    def _apply_anatomy_constraints(self, kpts, stride):
-        """Kiểm tra và sửa lỗi độ dài xương dựa trên tỷ lệ cơ thể"""
-        def get_p(idx):
-            base = idx * stride
-            if base + 1 >= len(kpts): return (0,0,0)
-            return kpts[base], kpts[base+1], (kpts[base+2] if stride==3 else 1.0)
-            
-        def set_p(idx, x, y):
-            base = idx * stride
-            if base + 1 < len(kpts):
-                kpts[base] = x
-                kpts[base+1] = y
-
-        def dist(p1, p2):
-            return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
-
-        # 1. Tính độ dài thân người (Torso) làm thước đo chuẩn
-        # Dùng khoảng cách 2 vai (5-6) hoặc Vai-Hông
-        s5 = get_p(5); s6 = get_p(6)
-        
-        ref_len = 0
-        if s5[2]>0 and s6[2]>0:
-            ref_len = dist(s5, s6) * 2.0 # Ước lượng thân người ~ 2 lần vai
-        
-        if ref_len < 10: return # Không đủ dữ liệu để tính
-
-        # 2. Ràng buộc các xương chi (Tay/Chân)
-        # Cấu trúc: (Khớp Cha, Khớp Con, Tỷ lệ tối đa so với thân)
-        bones = [
-            (5, 7, 1.2), (7, 9, 1.0),   # Tay Trái (Vai->Khuỷu, Khuỷu->Cổ tay)
-            (6, 8, 1.2), (8, 10, 1.0),  # Tay Phải
-        ]
-        
-        for p_idx, c_idx, ratio in bones:
-            p = get_p(p_idx); c = get_p(c_idx)
-            if p[2] > 0 and c[2] > 0:
-                d = dist(p, c)
-                max_len = ref_len * ratio
-                # Nếu xương quá dài -> Kéo khớp con về phía khớp cha
-                if d > max_len:
-                    factor = max_len / d
-                    new_x = p[0] + (c[0] - p[0]) * factor
-                    new_y = p[1] + (c[1] - p[1]) * factor
-                    set_p(c_idx, new_x, new_y)

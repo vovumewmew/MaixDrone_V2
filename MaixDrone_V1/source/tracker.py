@@ -1,8 +1,9 @@
 import math
 import time
 import config
-from source.postprocess import PoseFilter # [FIX] Import bộ lọc
+from source.postprocess import PoseFilter # [RESTORE] Import bộ lọc
 from source.gesture import PoseEstimator # [NEW] Import bộ phân tích cử chỉ
+from source.st_gcn import STGCN_Recognizer # [NEW] Import thuật toán ST-GCN
 
 class ObjectTracker:
     def __init__(self):
@@ -12,7 +13,7 @@ class ObjectTracker:
         self.next_id = 1
         self.max_miss_count = 30  # [UPDATE] Tăng lên 30 frame (1s) để chịu được vật cản che khuất
         self.dist_threshold = 100 # Khoảng cách tối đa để coi là cùng 1 người (pixel)
-        self.filter = PoseFilter() # [FIX] Khởi tạo bộ lọc
+        self.filter = PoseFilter() # [RESTORE] Khởi tạo bộ lọc
 
     def update(self, ai_results):
         """
@@ -132,6 +133,17 @@ class ObjectTracker:
                 # [GESTURE] Phân tích cử chỉ bằng RAW POINTS (để lấy độ tin cậy gốc)
                 # Filtered points chỉ dùng để vẽ cho mượt, còn logic cần biết AI chắc chắn đến đâu
                 gestures = self.objects[oid]['estimator'].update(raw_points)
+                
+                # [ST-GCN UPDATE] Chạy thuật toán nhận diện hành động theo chuỗi thời gian
+                # Sử dụng filtered_points (đã lọc nhiễu OneEuro) theo đúng Bước 2
+                st_action = self.objects[oid]['st_gcn'].update(filtered_points)
+                
+                # Nếu ST-GCN phát hiện vẫy tay, ghi đè hoặc thêm vào danh sách cử chỉ
+                if st_action == "Vay Tay Phai":
+                    if "Vay Tay Phai" not in gestures:
+                        # [UPDATE] Đã xóa thông báo debug theo yêu cầu
+                        gestures.append("Vay Tay Phai")
+
                 self.objects[oid]['gestures'] = gestures
                 
                 self.objects[oid]['score'] = res['score']
@@ -174,7 +186,8 @@ class ObjectTracker:
             'prev_raw_box': [raw_x, raw_y, raw_w, raw_h],
             'points': res.get('points', []), # [RAW] Lưu điểm thô
             'estimator': PoseEstimator(), # [NEW] Khởi tạo bộ phân tích cử chỉ riêng
-            'gestures': []
+            'gestures': [],
+            'st_gcn': STGCN_Recognizer(), # [ST-GCN] Khởi tạo bộ nhận diện hành động
         }
         self.next_id += 1
 

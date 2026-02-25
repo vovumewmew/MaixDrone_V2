@@ -8,6 +8,7 @@ class AIEngine:
         self.model = None
         self.input_w = 0 # [AUTO] Sẽ tự cập nhật theo Model
         self.input_h = 0 # [AUTO] Sẽ tự cập nhật theo Model
+        self.first_run = True # [DEBUG] Biến cờ để chỉ in log 1 lần
 
     def load(self):
         try:
@@ -60,6 +61,15 @@ class AIEngine:
                 pad_w = (self.input_w - new_w) // 2
                 pad_h = (self.input_h - new_h) // 2
                 img_input.draw_image(pad_w, pad_h, img_resized)
+                
+                # [DEBUG LETTERBOX] In thông số resize ra terminal (Chỉ in 1 lần đầu)
+                if self.first_run:
+                    print(f"🔍 [LETTERBOX CHECK]")
+                    print(f"   - Camera: {img_hd.width()}x{img_hd.height()}")
+                    print(f"   - Model Input: {self.input_w}x{self.input_h}")
+                    print(f"   - Resized to: {new_w}x{new_h} (Ratio: {ratio:.3f})")
+                    print(f"   - Padding: Left/Right={pad_w}px, Top/Bottom={pad_h}px")
+                    self.first_run = False
 
             # Chạy Model lần 1 để lấy Box
             # [FIX] Thêm keypoint_th để NPU không lọc bỏ điểm xương quá sớm

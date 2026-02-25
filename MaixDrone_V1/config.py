@@ -12,6 +12,7 @@ WIFI_PASS = "staff@@hutech"
 # --- CẤU HÌNH TINKERBOARD ---
 TINKER_IP = "10.60.4.175" # [SỬA LẠI] IP của Tinkerboard trong mạng Wifi Lab
 TINKER_PORT = 9999          # Port mà Tinkerboard đang lắng nghe
+ENABLE_TINKER = False       # [USER REQUEST] True: Mở kết nối, False: Tắt kết nối
 
 # --- CẤU HÌNH CAMERA (CHẾ ĐỘ HD) ---
 CAM_WIDTH = 320     # Chiều rộng (Width)

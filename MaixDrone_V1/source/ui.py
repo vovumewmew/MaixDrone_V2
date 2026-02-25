@@ -18,8 +18,8 @@ class HUD:
         # --- CẤU HÌNH HIỂN THỊ (Sửa True/False để Bật/Tắt các phần bạn muốn) ---
         self.SHOW_FPS = True         # Hiển thị FPS góc trái
         self.SHOW_COUNT = True       # Hiển thị số lượng người (Count: X)
-        self.SHOW_BOX = True         # Hiển thị khung chữ nhật bao quanh người
-        self.SHOW_INFO = True        # Hiển thị ID và độ tin cậy (%)
+        self.SHOW_BOX = True         # [RESTORE] Bật hiển thị khung chữ nhật
+        self.SHOW_INFO = False       # [UPDATE] Tắt hiển thị ID và độ tin cậy
         self.SHOW_GESTURE = True     # Hiển thị tên cử chỉ (Giơ tay, ngồi...)
         self.SHOW_SKELETON = True    # Hiển thị bộ xương và khớp nối
 
@@ -28,7 +28,7 @@ class HUD:
             (0, 1), (0, 2), (1, 3), (2, 4),         # Đầu
             (5, 6), (5, 7), (7, 9), (6, 8), (8, 10), # Tay
             (11, 12), (5, 11), (6, 12),             # Thân
-            (11, 13), (13, 15), (12, 14), (14, 16)  # Chân
+            (11, 13), (13, 15), (12, 14), (14, 16)  # [RESTORE] Chân
         ]
         
         self.last_print_time = time.time()
@@ -104,8 +104,8 @@ class HUD:
                         notification_msg = temp_msg
                         current_max_score = pose_score
 
-                    # [UI] Giảm kích thước chữ 50% (1.5 -> 0.8) cho gọn
-                    img.draw_string(int(bx + bw) + 5, int(by), g_text, self.C_YELLOW, 0.8)
+                    # [UPDATE] Ẩn hiển thị text cử chỉ thô (Dung, Cheo Tay...) bên cạnh người
+                    # img.draw_string(int(bx + bw) + 5, int(by), g_text, self.C_YELLOW, 0.8)
 
             # 3. Vẽ Xương (Pose) - Raw Output
             if self.SHOW_SKELETON:
