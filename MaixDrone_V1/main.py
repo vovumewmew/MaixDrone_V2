@@ -7,9 +7,16 @@ import select   # [NEW] Để kiểm tra dữ liệu không chặn (Non-blocking
 import config
 from maix import display, image # [UPDATE] Import thêm image để load font
 from source.camera import CameraManager
+
+try:
+    import psutil # Dùng cho CPython trên Linux
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
+
 from source.ai import AIEngine
 from source.stream import StreamServer, MessageServer # [UPDATE] Import thêm MessageServer
-from source.ui import HUD
+from source.ui import UIManager
 from source.tracker import ObjectTracker
 from source.tinker_client import TinkerClient # [NEW] Import Client gửi tin
 
@@ -80,7 +87,9 @@ def main():
 
     frame_cnt = 0
     t_last = time.time()
-    fps_show = 0
+    fps_show = 25.0  
+    t_last = time.perf_counter()
+    current_results = [] # [INIT] Khởi tạo biến lưu kết quả
     last_sent_msg = None # [NEW] Lưu tin nhắn cuối cùng đã gửi
     
     while True:
@@ -89,21 +98,21 @@ def main():
             time.sleep(0.001)
             continue
         
-        t_now = time.time()
+        t_now = time.perf_counter()
         dt = t_now - t_last
         if dt > 0:
-            fps_show = (fps_show * 0.9) + ((1.0/dt) * 0.1)
+            fps_show = (fps_show * 0.9) + ((1.0 / dt) * 0.1)
         t_last = t_now
-
         if config.ENABLE_AI:
             # [FULL PROCESSING] Chạy AI trên mọi khung hình
             # Loại bỏ hoàn toàn logic dự đoán (Hybrid) để đảm bảo dữ liệu thực tế nhất
-            _, ai_results = ai_engine.process(img)
-            current_results = tracker.update(ai_results)
-            
-            # [NEW] Gửi dữ liệu Pose sang Tinkerboard
-            if config.ENABLE_TINKER and tinker_client:
-                tinker_client.send_pose(current_results)
+            if frame_cnt % (SKIP_FRAMES + 1) == 0:
+                _, ai_results = ai_engine.process(img)
+                current_results = tracker.update(ai_results)
+                
+                # [NEW] Gửi dữ liệu Pose sang Tinkerboard
+                if config.ENABLE_TINKER and tinker_client:
+                    tinker_client.send_pose(current_results)
 
         hud.draw_fps(img, fps_show)
         if config.ENABLE_AI:
@@ -144,7 +153,18 @@ def main():
         disp.show(img) # [FIX] Dùng đối tượng disp để hiển thị
         
         frame_cnt += 1
-        if frame_cnt % 30 == 0: gc.collect()
+        
+        # [SMART GC] Quản lý bộ nhớ thông minh (Thay thế cho gc.collect() mỗi 30 frame)
+        # 1. Trigger Khẩn cấp: Tránh Out of Memory (Nếu có psutil)
+        if HAS_PSUTIL and frame_cnt % 30 == 0:
+            mem_usage = psutil.virtual_memory().percent
+            if mem_usage > 85.0: # Nếu RAM bị ăn hơn 85%
+                print(f"⚠️ CẢNH BÁO RAM ({mem_usage}%). Ép dọn rác khẩn cấp!")
+                gc.collect()
+        
+        # 2. Trigger Định kỳ nhưng kéo giãn thời gian (15 giây 1 lần thay vì 1.5 giây)
+        elif frame_cnt % 300 == 0:
+            gc.collect()
 
 if __name__ == "__main__":
     try: main()

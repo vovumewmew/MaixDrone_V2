@@ -2,18 +2,23 @@ import math
 import time
 
 class STGCN_Recognizer:
-    def __init__(self, window_size=30, stride=5):
+    def __init__(self, window_size=20, stride=3):
         # --- CẤU HÌNH ST-GCN ---
-        self.WINDOW_SIZE = window_size  # T=30 frames
-        self.STRIDE = stride            # Inference mỗi 5 frames
+        self.WINDOW_SIZE = window_size
+        self.STRIDE = stride
         self.buffer = []                # Hàng đợi (Queue) chứa chuỗi keypoints
         self.frame_counter = 0
         
-        # Trạng thái đầu ra
-        self.last_action = "Standing"
-        self.consecutive_count = 0      # Bộ đếm xác nhận (Step 5)
-        self.CONFIRM_THRESHOLD = 3      # Cần 3 lần detect liên tiếp để chốt
+        # [REQ] Cấu hình Debounce & Hysteresis (Chống nhòe chuyển động)
         self.PROB_THRESHOLD = 0.85      # Ngưỡng xác suất (Step 5)
+        
+        # Hit Counter (Bộ đếm kích hoạt)
+        self.wave_hit_count = 0
+        self.HIT_THRESHOLD = 4          # [NẠP CHẬM] Tăng lên 4: Cần vẫy dứt khoát (~0.4s) mới hiện
+        
+        # Missing Tolerance (Dung sai mất dấu)
+        self.missing_tolerance = 0
+        self.MAX_TOLERANCE = 2          # [XẢ NHANH] Giảm xuống 2: Dừng tay là tắt ngay (~0.2s)
 
     def update(self, keypoints):
         """
@@ -40,39 +45,36 @@ class STGCN_Recognizer:
         # Kiểm tra bước nhảy (Stride) - Chỉ chạy Inference mỗi 5 frame
         self.frame_counter += 1
         if self.frame_counter % self.STRIDE != 0:
-            return self.last_action if self.consecutive_count >= self.CONFIRM_THRESHOLD else None
+            # Trả về trạng thái hiện tại trong lúc chờ inference tiếp theo
+            return "Vay Tay Phai" if self.wave_hit_count >= self.HIT_THRESHOLD else None
 
         # [BƯỚC 4] THỰC THI ST-GCN (Core Inference)
         # Input Tensor: (1, 30, 17, 2) -> Batch, Time, Joints, Coords
         action_id, prob = self._inference(self.buffer)
 
-        # [BƯỚC 5] HẬU XỬ LÝ & KÍCH HOẠT (Post-processing)
-        final_action = None
-        
-        # 1. Thresholding
-        if prob > self.PROB_THRESHOLD:
-            # 2. Counter (Bộ đếm xác nhận)
-            if action_id == 1: # Class 1: Waving
-                detected_action = "Vay Tay Phai"
-            elif action_id == 2: # Class 2: Walking (Ví dụ)
-                detected_action = "Di Bo"
-            else:
-                detected_action = "Standing"
+        # [BƯỚC 5] HẬU XỬ LÝ (Debounce & Hysteresis Logic)
+        # Class 1: Waving (Vay Tay Phai)
+        is_waving = (prob > self.PROB_THRESHOLD and action_id == 1)
 
-            if detected_action == self.last_action:
-                self.consecutive_count += 1
-            else:
-                self.last_action = detected_action
-                self.consecutive_count = 1
-            
-            # Chỉ trả về kết quả nếu đã duy trì đủ lâu
-            if self.consecutive_count >= self.CONFIRM_THRESHOLD:
-                final_action = self.last_action
+        if is_waving:
+            # [HIT COUNTER] Tăng bộ đếm khi phát hiện đúng
+            self.wave_hit_count += 1
+            # [TOLERANCE] Nạp đầy dung sai (Reset bộ đếm lùi)
+            self.missing_tolerance = self.MAX_TOLERANCE
         else:
-            # Nếu xác suất thấp, reset bộ đếm dần dần
-            self.consecutive_count = max(0, self.consecutive_count - 1)
+            # [MISSING TOLERANCE] Xử lý khi mất dấu (Motion Blur / Che khuất)
+            if self.missing_tolerance > 0:
+                self.missing_tolerance -= 1
+                # Vẫn giữ nguyên wave_hit_count để duy trì trạng thái
+            else:
+                # Chỉ reset khi đã hết dung sai
+                self.wave_hit_count = 0
 
-        return final_action
+        # Output kết quả dựa trên ngưỡng kích hoạt
+        if self.wave_hit_count >= self.HIT_THRESHOLD:
+            return "Vay Tay Phai"
+        
+        return None
 
     def _normalize(self, kpts):
         """
@@ -135,8 +137,8 @@ class STGCN_Recognizer:
         
         # Điều kiện: Cổ tay phải (10) cao hơn ngưỡng cho phép
         # Trong hệ toạ độ chuẩn hóa (Normalized): Gốc (0,0) tại Hông, Vai ~ -1.0.
-        # Ta cho phép tay thấp hơn vai một chút (0.3 * Torso Length) để bắt được vẫy tay thấp.
-        threshold_y = p_sho[1] + 0.3
+        # Ta cho phép tay thấp hơn vai một chút (0.65 * Torso Length) để bắt được vẫy tay thấp.
+        threshold_y = p_sho[1] + 0.65
         
         # Y trục hướng xuống -> Lớn hơn nghĩa là thấp hơn (buông thõng)
         if p_wri[1] > threshold_y:
@@ -158,14 +160,18 @@ class STGCN_Recognizer:
         # Tính tần số dao động (Zero-crossing rate của vận tốc)
         # Để phân biệt vẫy tay với việc di chuyển tay một lần
         velocities = [wrist_x_seq[i] - wrist_x_seq[i-1] for i in range(1, len(wrist_x_seq))]
+        
+        # [REQ] Lọc bỏ vận tốc rác (jitter) trước khi đếm đảo chiều
+        clean_velocities = [v for v in velocities if abs(v) > 0.03]
+        
         zero_crossings = 0
-        for i in range(1, len(velocities)):
-            if velocities[i] * velocities[i-1] < 0:
+        for i in range(1, len(clean_velocities)):
+            if clean_velocities[i] * clean_velocities[i-1] < 0:
                 zero_crossings += 1
 
         # --- SOFTMAX SIMULATION ---
-        # Logic: Variance cao (>0.02 sau khi norm) VÀ có đảo chiều (>2 lần trong 30 frame)
-        if var_x > 0.02 and zero_crossings >= 3:
+        # [REQ] Giảm ngưỡng Variance (>0.015) và số lần đảo chiều (>=2) để nhạy hơn
+        if var_x > 0.015 and zero_crossings >= 2:
             # Tính xác suất giả lập dựa trên độ mạnh của tín hiệu
             prob = min(0.99, 0.7 + var_x * 5) 
             return 1, prob # Class 1: Waving

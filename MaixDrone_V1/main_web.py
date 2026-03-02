@@ -20,7 +20,7 @@ def main():
     cam_mgr.start()
     streamer.start()
     
-    SKIP_FRAMES = 3
+    SKIP_FRAMES = 0
     
     if config.ENABLE_AI:
         if not ai_engine.load():

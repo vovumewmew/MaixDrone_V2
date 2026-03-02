@@ -1,5 +1,7 @@
 from maix import nn, image
+import math # [NEW] Cần dùng math để tính khoảng cách xương
 import config # Import config để lấy KEYPOINT_THRESHOLD
+import time # [NEW] Để kiểm soát spam log
 
 class AIEngine:
     def __init__(self, model_path, conf_threshold):
@@ -9,6 +11,7 @@ class AIEngine:
         self.input_w = 0 # [AUTO] Sẽ tự cập nhật theo Model
         self.input_h = 0 # [AUTO] Sẽ tự cập nhật theo Model
         self.first_run = True # [DEBUG] Biến cờ để chỉ in log 1 lần
+        self.last_warning_time = 0 # [DEBUG] Chống spam cảnh báo
 
     def load(self):
         try:
@@ -40,36 +43,25 @@ class AIEngine:
         
         try:
             # --- GIAI ĐOẠN 1: TÌM NGƯỜI (GLOBAL DETECTION) ---
-            # [OPTIMIZATION] Kiểm tra nếu ảnh đầu vào đã đúng kích thước Model (320x224)
-            # thì bỏ qua bước Resize và Padding để tăng tốc độ xử lý.
-            if img_hd.width() == self.input_w and img_hd.height() == self.input_h:
-                img_input = img_hd
-                ratio = 1.0
-                pad_w = 0
-                pad_h = 0
+            
+            # [PERFORMANCE] FAST RESIZE STRATEGY (Thay thế Letterbox)
+            # Thay vì tạo ảnh nền đen và padding (tốn RAM/CPU), ta resize thẳng.
+            # Chấp nhận méo hình dọc nhẹ (~6%) để đổi lấy tốc độ.
+            
+            # 1. Resize ảnh đầu vào (nếu cần)
+            if img_hd.width() != self.input_w or img_hd.height() != self.input_h:
+                img_input = img_hd.resize(self.input_w, self.input_h)
             else:
-                # Tính tỷ lệ scale để ảnh vừa khít khung 320x224 mà không bị méo
-                ratio = min(self.input_w / img_hd.width(), self.input_h / img_hd.height())
-                new_w = int(img_hd.width() * ratio)
-                new_h = int(img_hd.height() * ratio)
-                
-                # Resize ảnh gốc
-                img_resized = img_hd.resize(new_w, new_h)
-                
-                # Tạo ảnh nền đen 320x224 và dán ảnh đã resize vào giữa
-                img_input = image.Image(self.input_w, self.input_h) # Mặc định là đen
-                pad_w = (self.input_w - new_w) // 2
-                pad_h = (self.input_h - new_h) // 2
-                img_input.draw_image(pad_w, pad_h, img_resized)
-                
-                # [DEBUG LETTERBOX] In thông số resize ra terminal (Chỉ in 1 lần đầu)
-                if self.first_run:
-                    print(f"🔍 [LETTERBOX CHECK]")
-                    print(f"   - Camera: {img_hd.width()}x{img_hd.height()}")
-                    print(f"   - Model Input: {self.input_w}x{self.input_h}")
-                    print(f"   - Resized to: {new_w}x{new_h} (Ratio: {ratio:.3f})")
-                    print(f"   - Padding: Left/Right={pad_w}px, Top/Bottom={pad_h}px")
-                    self.first_run = False
+                img_input = img_hd
+
+            # 2. Tính tỷ lệ hồi quy (Mapping Scale)
+            # Dùng để map toạ độ từ Model (320x224) ngược về Camera (320x240)
+            scale_x = img_hd.width() / self.input_w
+            scale_y = img_hd.height() / self.input_h
+
+            if self.first_run:
+                print(f"🚀 [PERFORMANCE MODE] Direct Resize Activated: {scale_x:.2f}x{scale_y:.2f}")
+                self.first_run = False
 
             # Chạy Model lần 1 để lấy Box
             # [FIX] Thêm keypoint_th để NPU không lọc bỏ điểm xương quá sớm
@@ -79,18 +71,19 @@ class AIEngine:
             objs = self.model.detect(img_input, conf_th=self.threshold, iou_th=0.45, keypoint_th=config.KEYPOINT_THRESHOLD)
             
             for obj in objs:
-                # Map Box gốc từ YOLO
-                bx = (obj.x - pad_w) / ratio
-                by = (obj.y - pad_h) / ratio
-                bw = obj.w / ratio
-                bh = obj.h / ratio
+                # Map Box gốc từ YOLO (Nhân với scale thay vì chia ratio)
+                bx = obj.x * scale_x
+                by = obj.y * scale_y
+                bw = obj.w * scale_x
+                bh = obj.h * scale_y
 
-                # [PADDING] Mở rộng 10% để bao quát toàn bộ vật thể (như lúc ổn định)
-                PAD_RATIO = 0.10
-                pad_w_val = bw * PAD_RATIO
-                pad_h_val = bh * PAD_RATIO
+                # [PADDING] Mở rộng Box để bao quát tay giơ cao
+                pad_w_val = bw * 0.25  # Mở rộng chiều ngang 10%
+                pad_h_val = bh * 0.25  # [HACK] Mở rộng chiều dọc lên hẳn 25%
+
+                # Tùy chỉnh dịch tâm Box lên phía trên một chút (để hứng cái tay)
                 bx -= pad_w_val / 2
-                by -= pad_h_val / 2
+                by -= pad_h_val * 0.7  # [HACK] Dịch phần lớn phần đệm lên trên đầu
                 bw += pad_w_val
                 bh += pad_h_val
 
@@ -104,10 +97,23 @@ class AIEngine:
 
                     for i in range(num_points):
                         base = i * stride
-                        px = (obj.points[base] - pad_w) / ratio
-                        py = (obj.points[base+1] - pad_h) / ratio
+                        px = obj.points[base] * scale_x
+                        py = obj.points[base+1] * scale_y
                         conf = obj.points[base+2] if stride == 3 else 1.0
+
+                        # [CORNER TRAP] Lọc điểm ma kẹt ở góc trên BBox
+                        # [DYNAMIC] Dùng 8% kích thước cạnh lớn nhất của Box làm bán kính góc kẹt
+                        if conf > 0:
+                            corner_thresh = max(bw, bh) * 0.08
+                            d_tl = math.sqrt((px - bx)**2 + (py - by)**2)
+                            d_tr = math.sqrt((px - (bx + bw))**2 + (py - by)**2)
+                            if d_tl < corner_thresh or d_tr < corner_thresh:
+                                conf = 0.0
+
                         final_points.extend([px, py, conf])
+
+                # [EDGE FIX] Ràng buộc chiều dài xương (Bone Length Constraint)
+                self._apply_bone_constraint(final_points)
 
                 # Convert sang int và kẹp biên
                 bx = int(max(0, bx))
@@ -128,3 +134,44 @@ class AIEngine:
             print(f"⚠️ AI Error: {e}")
         
         return img_hd, results
+
+    def _apply_bone_constraint(self, points):
+        """
+        [KINEMATIC EXTRAPOLATION] Tự động tái tạo cẳng tay khi AI bị mù hoặc vẽ dị dạng (T-Rex).
+        """
+        def fix_arm_kinematics(sho_idx, elb_idx, wri_idx):
+            base_s, base_e, base_w = sho_idx * 3, elb_idx * 3, wri_idx * 3
+            
+            # Kiểm tra an toàn index
+            if base_w + 2 >= len(points): return
+            
+            sho_x, sho_y, sho_c = points[base_s], points[base_s+1], points[base_s+2]
+            elb_x, elb_y, elb_c = points[base_e], points[base_e+1], points[base_e+2]
+            wri_x, wri_y, wri_c = points[base_w], points[base_w+1], points[base_w+2]
+
+            # Chỉ nội suy nếu AI vẫn đang nhìn thấy Vai và Khuỷu tay tương đối rõ
+            if sho_c > 0.25 and elb_c > 0.25:
+                upper_arm = math.sqrt((elb_x - sho_x)**2 + (elb_y - sho_y)**2)
+                
+                if upper_arm > 10.0: # Tránh chia cho 0 hoặc nhiễu quá nhỏ
+                    lower_arm = math.sqrt((wri_x - elb_x)**2 + (wri_y - elb_y)**2)
+                    ratio = lower_arm / upper_arm
+                    
+                    # Nếu tay bị rút (ratio < 0.75) HOẶC mất dấu hoàn toàn (conf < 0.15)
+                    if ratio < 0.75 or wri_c < 0.15:
+                        # TÍNH TOÁN ĐỘNG HỌC (Phóng vector)
+                        dx = elb_x - sho_x
+                        dy = elb_y - sho_y
+                        
+                        # Cẳng tay thực tế thường dài bằng ~1.3 lần bắp tay
+                        points[base_w] = elb_x + dx * 1.1
+                        points[base_w+1] = elb_y + dy * 1.1
+                        
+                        # Gán Conf = 0.5 (Đủ lớn để FSM nhận diện "Giơ tay", 
+                        # nhưng đủ nhỏ để OneEuroFilter biết đây là dữ liệu dự đoán)
+                        points[base_w+2] = 0.5 
+
+        # Áp dụng cho Tay Trái (Vai: 5, Khuỷu: 7, Cổ tay: 9)
+        fix_arm_kinematics(5, 7, 9)
+        # Áp dụng cho Tay Phải (Vai: 6, Khuỷu: 8, Cổ tay: 10)
+        fix_arm_kinematics(6, 8, 10)

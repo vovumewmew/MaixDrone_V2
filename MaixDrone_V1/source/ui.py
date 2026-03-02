@@ -31,7 +31,6 @@ class HUD:
             (11, 13), (13, 15), (12, 14), (14, 16)  # [RESTORE] Chân
         ]
         
-        self.last_print_time = time.time()
         # [NEW] Biến để giới hạn tốc độ in log ra terminal (1s/lần)
         self.last_action_msg = None
         self.last_action_time = 0
@@ -56,12 +55,8 @@ class HUD:
 
         if not results: return
 
-        do_print = False
         notification_msg = None # Biến lưu nội dung thông báo
         current_max_score = -1.0 # [NEW] Biến lưu điểm tin cậy cao nhất để ưu tiên hiển thị
-        if time.time() - self.last_print_time > 2.0:
-            do_print = True
-            self.last_print_time = time.time()
 
         for obj in results:
             # Lấy thông tin từ Tracker
@@ -104,7 +99,7 @@ class HUD:
                         notification_msg = temp_msg
                         current_max_score = pose_score
 
-                    # [UPDATE] Ẩn hiển thị text cử chỉ thô (Dung, Cheo Tay...) bên cạnh người
+                    # [UPDATE] Hiển thị text cử chỉ thô (Dung, Cheo Tay...) bên cạnh người
                     # img.draw_string(int(bx + bw) + 5, int(by), g_text, self.C_YELLOW, 0.8)
 
             # 3. Vẽ Xương (Pose) - Raw Output
@@ -139,21 +134,6 @@ class HUD:
                 for px, py in joints.values():
                     img.draw_circle(px, py, 2, self.C_WHITE, -1)
             
-            # [UPDATE] Ẩn phần in toạ độ điểm theo yêu cầu
-            # if do_print:
-            #     # [DEBUG] Hiển thị lại toạ độ để debug
-            #     points = obj.get('points', [])
-            #     stride = 3 if len(points) % 3 == 0 else 2
-            #     num_points = len(points) // stride
-                
-            #     info = []
-            #     for i in range(num_points):
-            #         base = i * stride
-            #         x = int(points[base])
-            #         y = int(points[base+1])
-            #         name = self.keypoint_names.get(i, str(i))
-            #         info.append(f"{name}:({x},{y})")
-            #     print(f"ID{oid}: " + ", ".join(info))
         
         # [UI] Vẽ thông báo ở góc dưới màn hình (nếu có)
         if notification_msg:
@@ -164,9 +144,6 @@ class HUD:
         if notification_msg != self.last_action_msg:
             self.last_action_msg = notification_msg
             # print(f"🔔 ACTION: {notification_msg}") # Uncomment dòng này nếu muốn xem log trên Drone
-            
-        if do_print:
-            print()
 
     def _draw_notification(self, img, text):
         """Vẽ thông báo nền trắng chữ đen ở góc dưới (Auto Wrap)"""

@@ -91,7 +91,8 @@ class ObjectTracker:
                 # - Đứng yên (dist < 3px): Alpha cực nhỏ (0.05) -> Khóa cứng, chống rung tuyệt đối
                 # - Di chuyển (> 3px): Alpha tăng dần lên 0.4 -> Bám sát chuyển động
                 # - Di chuyển nhanh (> 20px): Alpha = 0.5 -> Phản hồi tức thì
-                alpha = 0.05 if center_dist < 3.0 else min(0.5, 0.05 + (center_dist / 20.0) * 0.45)
+                # [SPEED FIX] Tăng giới hạn Alpha từ 0.5 lên 0.85 để Box phản ứng tức thì khi di chuyển nhanh
+                alpha = 0.05 if center_dist < 3.0 else min(0.85, 0.05 + (center_dist / 20.0) * 0.80)
                 
                 smooth_box = [r * alpha + o * (1 - alpha) for r, o in zip(raw_box, old_box)]
                 
@@ -130,9 +131,9 @@ class ObjectTracker:
                 pose_score = self._calculate_quality(raw_points, filtered_points, res['score'], smooth_box[3])
                 self.objects[oid]['pose_score'] = pose_score
                 
-                # [GESTURE] Phân tích cử chỉ bằng RAW POINTS (để lấy độ tin cậy gốc)
-                # Filtered points chỉ dùng để vẽ cho mượt, còn logic cần biết AI chắc chắn đến đâu
-                gestures = self.objects[oid]['estimator'].update(raw_points)
+                # [GESTURE] Phân tích cử chỉ bằng FILTERED POINTS (để lấy toạ độ dự đoán khi bị che)
+                # Logic mới yêu cầu toạ độ mượt ngay cả khi conf=0 (Occlusion Handling)
+                gestures = self.objects[oid]['estimator'].update(filtered_points)
                 
                 # [ST-GCN UPDATE] Chạy thuật toán nhận diện hành động theo chuỗi thời gian
                 # Sử dụng filtered_points (đã lọc nhiễu OneEuro) theo đúng Bước 2
@@ -140,6 +141,10 @@ class ObjectTracker:
                 
                 # Nếu ST-GCN phát hiện vẫy tay, ghi đè hoặc thêm vào danh sách cử chỉ
                 if st_action == "Vay Tay Phai":
+                    # [REQ] Xóa trạng thái tĩnh "Phai Cao" để tránh xung đột hiển thị
+                    if "Phai Cao" in gestures:
+                        gestures.remove("Phai Cao")
+                        
                     if "Vay Tay Phai" not in gestures:
                         # [UPDATE] Đã xóa thông báo debug theo yêu cầu
                         gestures.append("Vay Tay Phai")
@@ -192,13 +197,15 @@ class ObjectTracker:
         self.next_id += 1
 
     def clean_up(self):
-        # Xóa ID nếu miss > max_miss_count
         to_delete = []
         for oid, data in self.objects.items():
             if data['miss'] > self.max_miss_count:
                 to_delete.append(oid)
         for oid in to_delete:
             del self.objects[oid]
+            # [MEMORY LEAK FIX] Giải phóng 1EF của đối tượng đã mất dấu
+            if oid in self.filter.object_filters:
+                del self.filter.object_filters[oid]
 
     def get_display_objects(self):
         # Trả về định dạng để UI vẽ
@@ -215,14 +222,6 @@ class ObjectTracker:
                 })
         return results
     
-    def predict(self):
-        # [PREDICTION] Dự đoán vị trí trong các frame bị skip
-        # Giúp tăng FPS (bằng cách tăng SKIP_FRAMES) mà hình ảnh vẫn mượt
-        
-        # [TEST] Tắt tính toán dự đoán (Zero Order Hold) để kiểm tra độ ổn định
-        # Box sẽ đứng yên trong các frame bị skip
-        return self.get_display_objects()
-
     def _calculate_quality(self, raw_points, filtered_points, det_score=0.0, bbox_height=1.0):
         """
         Tính điểm chất lượng Pose (Hybrid OKS/MPJPE Proxy):
