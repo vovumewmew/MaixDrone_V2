@@ -14,11 +14,13 @@ class HUD:
         self.C_PINK = image.Color(255, 105, 180) # Màu Hồng (HotPink)
         self.C_BLACK = image.Color(0, 0, 0)      # Màu Đen
         self.C_CYAN = image.Color(0, 255, 255)   # Màu Xanh Lơ (Cyan)
+        self.C_ORANGE = image.Color(255, 165, 0) # [NEW] Màu Cam
+        self.C_BLUE = image.Color(0, 0, 255)     # [NEW] Màu Xanh Dương
         
         # --- CẤU HÌNH HIỂN THỊ (Sửa True/False để Bật/Tắt các phần bạn muốn) ---
         self.SHOW_FPS = True         # Hiển thị FPS góc trái
         self.SHOW_COUNT = True       # Hiển thị số lượng người (Count: X)
-        self.SHOW_BOX = True         # [RESTORE] Bật hiển thị khung chữ nhật
+        self.SHOW_BOX = False        # Tắt hiển thị khung chữ nhật theo yêu cầu
         self.SHOW_INFO = False       # [UPDATE] Tắt hiển thị ID và độ tin cậy
         self.SHOW_GESTURE = True     # Hiển thị tên cử chỉ (Giơ tay, ngồi...)
         self.SHOW_SKELETON = True    # Hiển thị bộ xương và khớp nối
@@ -30,7 +32,7 @@ class HUD:
             (11, 12), (5, 11), (6, 12),             # Thân
             (11, 13), (13, 15), (12, 14), (14, 16)  # [RESTORE] Chân
         ]
-        
+
         # [NEW] Biến để giới hạn tốc độ in log ra terminal (1s/lần)
         self.last_action_msg = None
         self.last_action_time = 0
@@ -122,17 +124,17 @@ class HUD:
                 # 2. Vẽ dây (Line) - Màu Trắng
                 for i, j in self.SKELETON:
                     if i in joints and j in joints:
-                        img.draw_line(joints[i][0], joints[i][1], joints[j][0], joints[j][1], self.C_WHITE, 1)
+                        img.draw_line(joints[i][0], joints[i][1], joints[j][0], joints[j][1], self.C_WHITE, 2)
                 
                 # [CUSTOM] Vẽ đường nối từ Mũi (0) xuống Trung điểm Vai (5,6) - Tạo cảm giác cổ/ngực
                 if 0 in joints and 5 in joints and 6 in joints:
                     mx = int((joints[5][0] + joints[6][0]) / 2)
                     my = int((joints[5][1] + joints[6][1]) / 2)
-                    img.draw_line(joints[0][0], joints[0][1], mx, my, self.C_WHITE, 1)
+                    img.draw_line(joints[0][0], joints[0][1], mx, my, self.C_WHITE, 2)
 
-                # 3. Vẽ Khớp (Dot) - Màu Trắng (Đè lên dây)
+                # 3. Vẽ Khớp (Dot) - Màu Trắng
                 for px, py in joints.values():
-                    img.draw_circle(px, py, 2, self.C_WHITE, -1)
+                    img.draw_circle(px, py, 3, self.C_WHITE, -1)
             
         
         # [UI] Vẽ thông báo ở góc dưới màn hình (nếu có)

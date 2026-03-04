@@ -11,163 +11,244 @@ class ObjectTracker:
         # Format: { object_id: {'box': [x,y,w,h], 'miss': 0} }
         self.objects = {}
         self.next_id = 1
-        self.max_miss_count = 30  # [UPDATE] Tăng lên 30 frame (1s) để chịu được vật cản che khuất
-        self.dist_threshold = 100 # Khoảng cách tối đa để coi là cùng 1 người (pixel)
+        self.max_miss_count = getattr(config, "TRACK_MAX_MISS", 12)
+        self.dist_threshold = getattr(config, "TRACK_DIST_THRESHOLD", 100)
+        self.max_cost_threshold = getattr(config, "TRACK_COST_THRESHOLD", 1.20)
+        self.min_visible_ratio = getattr(config, "POSE_MIN_VISIBLE_RATIO", 0.35)
         self.filter = PoseFilter() # [RESTORE] Khởi tạo bộ lọc
 
     def update(self, ai_results):
         """
-        Thuật toán Centroid Tracking cơ bản:
-        So sánh tâm của Box mới với Box cũ để gán ID.
+        Matching accuracy-first:
+        - Ghep cap theo chi phi toan cuc (distance + IoU)
+        - Uu tien du lieu thuc te, giam du doan/lam muot
         """
         t_now = time.time()
-        
-        # 1. Tính tâm của các Box mới từ AI
-        input_centroids = []
-        for res in ai_results:
-            cx = res['x'] + res['w'] / 2
-            cy = res['y'] + res['h'] / 2
-            input_centroids.append((cx, cy, res))
 
-        # 2. Nếu chưa có đối tượng nào -> Đăng ký mới hết
+        # 1. Chuan hoa detections dau vao
+        detections = []
+        for res in ai_results:
+            raw_box = [float(res['x']), float(res['y']), float(res['w']), float(res['h'])]
+            cx, cy = self._box_center(raw_box)
+            raw_points = res.get('points', [])
+            detections.append({
+                'box': raw_box,
+                'cx': cx,
+                'cy': cy,
+                'res': res,
+                'anchor': self._pose_anchor(raw_points),
+                'visible_ratio': self._visible_ratio(raw_points)
+            })
+
+        # 2. Neu chua co object nao -> dang ky moi
         if not self.objects:
-            for _, _, res in input_centroids:
-                self.register(res)
+            for det in detections:
+                self.register(det['res'])
             return self.get_display_objects()
 
-        # 3. So sánh khoảng cách để update ID
-        # Tạo danh sách ID hiện có và tâm của chúng
+        # 3. Tao tat ca cap ung vien (cost thap la tot)
         object_ids = list(self.objects.keys())
-        object_centroids = []
+        pairs = []
         for oid in object_ids:
-            box = self.objects[oid]['box']
-            vel = self.objects[oid].get('velocity', [0,0,0,0])
-            
-            # [FIX 1] Predictive Matching (Bắt cặp dựa trên Dự đoán)
-            # Dự đoán vị trí hiện tại dựa trên vận tốc, giúp tránh nhầm lẫn khi 2 người đi qua nhau
-            dt_match = t_now - self.objects[oid].get('last_time', t_now)
-            if dt_match > 1.0: dt_match = 0 # Safety check
-            
-            pred_cx = box[0] + box[2]/2 + vel[0] * dt_match
-            pred_cy = box[1] + box[3]/2 + vel[1] * dt_match
-            object_centroids.append((pred_cx, pred_cy))
+            data = self.objects[oid]
+            old_box = data['box']
+            old_vel = data.get('velocity', [0.0, 0.0, 0.0, 0.0])
 
-        # Đánh dấu đã dùng
-        used_input = [False] * len(input_centroids)
+            dt_match = t_now - data.get('last_time', t_now)
+            if dt_match < 0.0 or dt_match > 0.35:
+                dt_match = 0.0
 
-        # Duyệt qua từng object cũ, tìm input mới gần nhất
-        for i, (old_cx, old_cy) in enumerate(object_centroids):
-            min_dist = 999999
-            best_match_idx = -1
+            old_cx, old_cy = self._box_center(old_box)
+            pred_cx = old_cx + old_vel[0] * dt_match
+            pred_cy = old_cy + old_vel[1] * dt_match
 
-            for j, (new_cx, new_cy, _) in enumerate(input_centroids):
-                if used_input[j]: continue
-                
-                dist = math.sqrt((old_cx - new_cx)**2 + (old_cy - new_cy)**2)
-                # [DYNAMIC] Ngưỡng theo kích thước box (tránh nhầm ID khi xa/gần)
-                dynamic_th = self.dist_threshold
-                if i < len(object_ids):
-                    obox = self.objects[object_ids[i]]['box']
-                    dynamic_th = max(60, min(200, 0.6 * max(obox[2], obox[3])))
-                if dist < min_dist and dist < dynamic_th:
-                    min_dist = dist
-                    best_match_idx = j
-            
-            # Nếu tìm thấy cặp đôi hoàn hảo
-            if best_match_idx != -1:
-                oid = object_ids[i]
-                res = input_centroids[best_match_idx][2]
-                
-                raw_box = [res['x'], res['y'], res['w'], res['h']]
-                old_data = self.objects[oid]
-                old_box = old_data['box']
+            size_ref = max(1.0, max(old_box[2], old_box[3]))
+            dynamic_th = max(40.0, min(220.0, max(self.dist_threshold, 0.8 * size_ref)))
 
-                # [EMA SMOOTHING] Adaptive Alpha (Làm mượt thích ứng)
-                # Tính khoảng cách di chuyển của tâm Box so với frame trước
-                center_dist = math.sqrt(((raw_box[0]+raw_box[2]/2) - (old_box[0]+old_box[2]/2))**2 + 
-                                      ((raw_box[1]+raw_box[3]/2) - (old_box[1]+old_box[3]/2))**2)
-                
-                # Logic: 
-                # - Đứng yên (dist < 3px): Alpha cực nhỏ (0.05) -> Khóa cứng, chống rung tuyệt đối
-                # - Di chuyển (> 3px): Alpha tăng dần lên 0.4 -> Bám sát chuyển động
-                # - Di chuyển nhanh (> 20px): Alpha = 0.5 -> Phản hồi tức thì
-                # [SPEED FIX] Tăng giới hạn Alpha từ 0.5 lên 0.85 để Box phản ứng tức thì khi di chuyển nhanh
-                alpha = 0.05 if center_dist < 3.0 else min(0.85, 0.05 + (center_dist / 20.0) * 0.80)
-                
-                smooth_box = [r * alpha + o * (1 - alpha) for r, o in zip(raw_box, old_box)]
-                
-                # [UPDATE] Tính vận tốc để dự đoán hướng đi khi bị che khuất
-                dt = t_now - old_data['last_time']
-                if dt > 0:
-                    vx = (smooth_box[0] - old_box[0]) / dt
-                    vy = (smooth_box[1] - old_box[1]) / dt
-                    old_vel = old_data.get('velocity', [0,0,0,0])
-                    # Lọc mạnh (alpha nhỏ) để tránh nhiễu do rung lắc ở xa
-                    v_alpha = 0.2
-                    svx = vx * v_alpha + old_vel[0] * (1 - v_alpha)
-                    svy = vy * v_alpha + old_vel[1] * (1 - v_alpha)
-                    self.objects[oid]['velocity'] = [svx, svy, 0, 0]
-                
-                self.objects[oid]['box'] = smooth_box
-                self.objects[oid]['prev_raw_box'] = raw_box
-                self.objects[oid]['last_time'] = t_now
-                
-                # [FILTERING] Chỉ lọc điểm (Points) để chống rung
-                raw_points = res.get('points', [])
-                
-                old_points = self.objects[oid].get('points', [])
-                
-                # [ROBUST] Nếu điểm trống/yếu -> giữ điểm cũ vài frame
-                if not raw_points:
-                    filtered_points = self.objects[oid].get('points', [])
-                else:
-                    filtered_points = self.filter.filter_kpts(oid, t_now, raw_points, bbox=smooth_box)
+            for det_idx, det in enumerate(detections):
+                dx = pred_cx - det['cx']
+                dy = pred_cy - det['cy']
+                iou = self._box_iou(old_box, det['box'])
 
-                self.objects[oid]['points'] = filtered_points
-                
-                # [METRIC ADVANCED] Tính điểm chất lượng dựa trên OKS & MPJPE (Proxy)
-                # So sánh độ lệch giữa Raw và Filtered để đánh giá độ ổn định
-                # [UPDATE] Truyền thêm chiều cao (h) để chuẩn hóa Jitter theo kích thước người
-                pose_score = self._calculate_quality(raw_points, filtered_points, res['score'], smooth_box[3])
-                self.objects[oid]['pose_score'] = pose_score
-                
-                # [GESTURE] Phân tích cử chỉ bằng FILTERED POINTS (để lấy toạ độ dự đoán khi bị che)
-                # Logic mới yêu cầu toạ độ mượt ngay cả khi conf=0 (Occlusion Handling)
-                gestures = self.objects[oid]['estimator'].update(filtered_points)
-                
-                # [ST-GCN UPDATE] Chạy thuật toán nhận diện hành động theo chuỗi thời gian
-                # Sử dụng filtered_points (đã lọc nhiễu OneEuro) theo đúng Bước 2
-                st_action = self.objects[oid]['st_gcn'].update(filtered_points)
-                
-                # Nếu ST-GCN phát hiện vẫy tay, ghi đè hoặc thêm vào danh sách cử chỉ
-                if st_action == "Vay Tay Phai":
-                    # [REQ] Xóa trạng thái tĩnh "Phai Cao" để tránh xung đột hiển thị
-                    if "Phai Cao" in gestures:
-                        gestures.remove("Phai Cao")
-                        
-                    if "Vay Tay Phai" not in gestures:
-                        # [UPDATE] Đã xóa thông báo debug theo yêu cầu
-                        gestures.append("Vay Tay Phai")
+                if (abs(dx) > dynamic_th or abs(dy) > dynamic_th) and iou < 0.05:
+                    continue
 
-                self.objects[oid]['gestures'] = gestures
-                
-                self.objects[oid]['score'] = res['score']
-                self.objects[oid]['miss'] = 0 # Reset biến đếm mất dấu
-                
-                used_input[best_match_idx] = True
+                dist = math.sqrt(dx * dx + dy * dy)
+                if dist > dynamic_th and iou < 0.05:
+                    continue
+
+                norm_dist = dist / dynamic_th
+                cost = (0.70 * norm_dist) + (0.30 * (1.0 - iou))
+
+                # Them rang buoc "pose anchor" de giam nham ID khi cat nhau.
+                old_anchor = data.get('pose_anchor')
+                new_anchor = det.get('anchor')
+                if old_anchor and new_anchor:
+                    pose_th = max(30.0, min(180.0, 0.7 * size_ref))
+                    pdx = old_anchor[0] - new_anchor[0]
+                    pdy = old_anchor[1] - new_anchor[1]
+                    pose_dist = math.sqrt(pdx * pdx + pdy * pdy)
+                    norm_pose = min(1.5, pose_dist / pose_th)
+                    cost = (0.55 * norm_dist) + (0.25 * (1.0 - iou)) + (0.20 * norm_pose)
+
+                pairs.append((cost, oid, det_idx))
+
+        pairs.sort(key=lambda x: x[0])
+
+        used_objects = set()
+        used_detections = set()
+
+        # 4. Gan cap theo thu tu cost tang dan
+        for cost, oid, det_idx in pairs:
+            if oid in used_objects or det_idx in used_detections:
+                continue
+            if cost > self.max_cost_threshold:
+                continue
+
+            det = detections[det_idx]
+            res = det['res']
+            raw_box = det['box']
+            old_data = self.objects[oid]
+            old_box = old_data['box']
+
+            dt = t_now - old_data.get('last_time', t_now)
+            if dt <= 0.0:
+                dt = 1e-3
+
+            old_cx, old_cy = self._box_center(old_box)
+            new_cx, new_cy = self._box_center(raw_box)
+            vx = (new_cx - old_cx) / dt
+            vy = (new_cy - old_cy) / dt
+
+            prev_vel = old_data.get('velocity', [0.0, 0.0, 0.0, 0.0])
+            v_alpha = 0.60
+            old_data['velocity'] = [
+                vx * v_alpha + prev_vel[0] * (1.0 - v_alpha),
+                vy * v_alpha + prev_vel[1] * (1.0 - v_alpha),
+                0.0,
+                0.0
+            ]
+
+            # Accuracy-first: update box directly from detector
+            old_data['box'] = raw_box
+            old_data['prev_raw_box'] = raw_box
+            old_data['last_time'] = t_now
+            if det.get('anchor'):
+                old_data['pose_anchor'] = det['anchor']
+
+            raw_points = res.get('points', [])
+            if raw_points:
+                filtered_points = self.filter.filter_kpts(oid, t_now, raw_points, bbox=raw_box)
+                pose_input_points = raw_points
+                quality_points = filtered_points if filtered_points else raw_points
+                pose_score = self._calculate_quality(raw_points, quality_points, res['score'], raw_box[3])
             else:
-                # Không tìm thấy input mới cho object này -> Tăng biến mất dấu
-                self.objects[object_ids[i]]['miss'] += 1
+                filtered_points = []
+                pose_input_points = []
+                pose_score = 0.0
 
-        # 4. Đăng ký các input mới chưa có chủ
-        for i, used in enumerate(used_input):
-            if not used:
-                self.register(input_centroids[i][2])
+            old_data['points'] = filtered_points
+            old_data['pose_score'] = pose_score
 
-        # 5. Xóa các object mất dấu quá lâu
+            # Motion recognition accuracy + speed:
+            # chi phan tich khi do phu keypoint du cao.
+            if pose_input_points and det.get('visible_ratio', 0.0) >= self.min_visible_ratio:
+                gestures = old_data['estimator'].update(pose_input_points)
+                st_action = old_data['st_gcn'].update(pose_input_points)
+            else:
+                gestures = []
+                st_action = None
+
+            if st_action == "Vay Tay Phai":
+                if "Phai Cao" in gestures:
+                    gestures.remove("Phai Cao")
+                if "Vay Tay Phai" not in gestures:
+                    gestures.append("Vay Tay Phai")
+
+            old_data['gestures'] = gestures
+            old_data['score'] = res['score']
+            old_data['miss'] = 0
+
+            used_objects.add(oid)
+            used_detections.add(det_idx)
+
+        # 5. Tang miss cho object khong duoc ghep
+        for oid in object_ids:
+            if oid not in used_objects:
+                self.objects[oid]['miss'] += 1
+                self.objects[oid]['gestures'] = []
+                self.objects[oid]['points'] = []
+
+        # 6. Dang ky detection moi chua co chu
+        for det_idx, det in enumerate(detections):
+            if det_idx not in used_detections:
+                self.register(det['res'])
+
+        # 7. Xoa object mat dau qua lau
         self.clean_up()
 
         return self.get_display_objects()
+
+    def _box_center(self, box):
+        return box[0] + box[2] / 2.0, box[1] + box[3] / 2.0
+
+    def _box_iou(self, box_a, box_b):
+        ax1, ay1 = box_a[0], box_a[1]
+        ax2, ay2 = box_a[0] + box_a[2], box_a[1] + box_a[3]
+        bx1, by1 = box_b[0], box_b[1]
+        bx2, by2 = box_b[0] + box_b[2], box_b[1] + box_b[3]
+
+        inter_x1 = max(ax1, bx1)
+        inter_y1 = max(ay1, by1)
+        inter_x2 = min(ax2, bx2)
+        inter_y2 = min(ay2, by2)
+
+        inter_w = max(0.0, inter_x2 - inter_x1)
+        inter_h = max(0.0, inter_y2 - inter_y1)
+        inter_area = inter_w * inter_h
+
+        area_a = max(0.0, box_a[2]) * max(0.0, box_a[3])
+        area_b = max(0.0, box_b[2]) * max(0.0, box_b[3])
+        union_area = area_a + area_b - inter_area
+
+        if union_area <= 0.0:
+            return 0.0
+        return inter_area / union_area
+
+    def _visible_ratio(self, points):
+        if not points or len(points) < 3:
+            return 0.0
+        stride = 3 if len(points) % 3 == 0 else 2
+        if stride != 3:
+            return 1.0
+        total = len(points) // 3
+        if total <= 0:
+            return 0.0
+        visible = 0
+        for i in range(total):
+            conf = points[i * 3 + 2]
+            if conf >= 0.15:
+                visible += 1
+        return visible / float(total)
+
+    def _pose_anchor(self, points):
+        if not points or len(points) < 3:
+            return None
+        stride = 3 if len(points) % 3 == 0 else 2
+        ids = [5, 6, 11, 12]  # shoulders + hips
+        xs = []
+        ys = []
+        for idx in ids:
+            base = idx * stride
+            if base + 1 >= len(points):
+                continue
+            conf = points[base + 2] if stride == 3 and (base + 2) < len(points) else 1.0
+            if conf >= 0.20:
+                xs.append(points[base])
+                ys.append(points[base + 1])
+        if not xs:
+            return None
+        return (sum(xs) / len(xs), sum(ys) / len(ys))
 
     def register(self, res):
         # [INIT] Áp dụng Padding và Ratio ngay từ đầu để Box đẹp ngay frame đầu tiên
@@ -190,6 +271,7 @@ class ObjectTracker:
             'pose_score': pose_score, # [NEW] Lưu độ tin cậy Pose
             'prev_raw_box': [raw_x, raw_y, raw_w, raw_h],
             'points': res.get('points', []), # [RAW] Lưu điểm thô
+            'pose_anchor': self._pose_anchor(raw_points),
             'estimator': PoseEstimator(), # [NEW] Khởi tạo bộ phân tích cử chỉ riêng
             'gestures': [],
             'st_gcn': STGCN_Recognizer(), # [ST-GCN] Khởi tạo bộ nhận diện hành động

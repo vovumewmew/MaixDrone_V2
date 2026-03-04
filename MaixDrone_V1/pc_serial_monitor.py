@@ -24,6 +24,30 @@ SAVE_DIR = "captured_images"
 if not os.path.exists(SAVE_DIR):
     os.makedirs(SAVE_DIR)
 
+# --- CẤU HÌNH GIỌNG NÓI ---
+SPEAK_START_DELAY = 1.0      # Chỉ đọc khi cảnh báo đã tồn tại quá 1 giây
+SPEAK_REPEAT_INTERVAL = 1.0  # Lặp lại mỗi 1 giây
+TTS_RATE = 150
+
+def init_tts_engine():
+    """Khởi tạo engine 1 lần để tránh lag/spam tài nguyên."""
+    try:
+        engine = pyttsx3.init()
+        engine.setProperty('rate', TTS_RATE)
+        return engine
+    except Exception as e:
+        print(f"⚠️ Không thể khởi tạo TTS engine: {e}")
+        return None
+
+def speak_text(engine, text):
+    if not engine or not text:
+        return
+    try:
+        engine.say(text)
+        engine.runAndWait()
+    except Exception as e:
+        print(f"⚠️ Lỗi phát giọng nói: {e}")
+
 def main():
     print(f"🔌 Đang kết nối tới Server (Local) tại {DRONE_IP}:{MSG_PORT}...")
     
@@ -35,10 +59,13 @@ def main():
         
         print(f"✅ Đã kết nối tới {DRONE_IP}! Đang chờ tín hiệu từ Drone...")
         
+        tts_engine = init_tts_engine()
+
         # Loop nhận dữ liệu
         client.settimeout(0.1) # [IMPORTANT] Timeout ngắn để vòng lặp chạy liên tục (check timer)
         current_msg = None
-        last_speak_time = 0
+        msg_active_since = 0.0
+        next_speak_time = 0.0
         buffer = "" # [NEW] Bộ đệm để ghép nối dữ liệu bị cắt
         
         while True:
@@ -79,15 +106,22 @@ def main():
                     
                     # [LOGIC] Cập nhật trạng thái hiện tại (Di chuyển vào trong vòng lặp)
                     # Để đảm bảo chỉ xử lý khi không phải là ảnh
+                    now_ts = time.time()
                     if msg == "None":
                         if current_msg is not None:
                             print("🛑 Đã dừng hành động.")
                         current_msg = None
+                        msg_active_since = 0.0
+                        next_speak_time = 0.0
+                        if tts_engine:
+                            try: tts_engine.stop()
+                            except Exception: pass
                     elif msg != current_msg:
                         # Chỉ in và reset timer nếu thông báo KHÁC với hiện tại
                         print(f"📥 CẢNH BÁO MỚI: {msg}")
                         current_msg = msg
-                        last_speak_time = 0 # Reset để đọc ngay lập tức
+                        msg_active_since = now_ts
+                        next_speak_time = msg_active_since + SPEAK_START_DELAY
                 
             except (socket.timeout, TimeoutError):
                 pass # Hết 0.1s mà không có tin mới -> Chạy tiếp xuống dưới để check timer
@@ -95,20 +129,12 @@ def main():
                 print(f"❌ Lỗi nhận dữ liệu: {e}")
                 break
             
-            # [SPEECH] Kiểm tra timer để đọc lặp lại mỗi 1 giây
+            # [SPEECH] Chỉ đọc khi cảnh báo đã tồn tại > 1s, sau đó lặp mỗi 1s
             if current_msg:
-                time_diff = time.time() - last_speak_time
-                if time_diff > 1.0:
-                    try:
-                        # [SIMPLE] Khởi tạo và đọc trực tiếp (Blocking nhưng ổn định)
-                        engine = pyttsx3.init()
-                        engine.setProperty('rate', 150)
-                        engine.say(current_msg)
-                        engine.runAndWait()
-                        engine.stop()
-                        del engine
-                    except Exception: pass
-                    last_speak_time = time.time()
+                now_ts = time.time()
+                if now_ts >= next_speak_time and (now_ts - msg_active_since) >= SPEAK_START_DELAY:
+                    speak_text(tts_engine, current_msg)
+                    next_speak_time = now_ts + SPEAK_REPEAT_INTERVAL
     
     except KeyboardInterrupt:
         print("\n🛑 Đã dừng chương trình (User Interrupt).")
@@ -118,6 +144,11 @@ def main():
         time.sleep(2)
         
     finally:
+        try:
+            if 'tts_engine' in locals() and tts_engine:
+                tts_engine.stop()
+        except Exception:
+            pass
         try: client.close()
         except: pass
 

@@ -52,107 +52,73 @@ class PoseFilter:
         self.d_cutoff = 1.0
 
     def filter_kpts(self, oid, t, kpts, bbox=None):
-        if not kpts: return []
-        
+        if not kpts:
+            return []
+
+        # Accuracy-first mode:
+        # Keep keypoints close to raw detections to preserve motion dynamics.
         stride = 3 if len(kpts) % 3 == 0 else 2
-
-        bbox_h = 1.0
-        if bbox and len(bbox) >= 4:
-            bbox_h = max(1.0, float(bbox[3]))
-
-        self.d_cutoff = 0.8
-
-        # [STABILITY TUNING] Giảm Beta và Min_Cutoff để bộ lọc đầm hơn
-        if bbox_h < 150:
-            min_cutoff = 0.002
-            beta = 0.8
-        else:
-            min_cutoff = 0.005
-            beta = 2.0
-        
-        if oid not in self.object_filters:
-            self.object_filters[oid] = {}
-            
-        filters = self.object_filters[oid]
         filtered_kpts = []
         num_points = len(kpts) // stride
-        
+
+        # Bo sung occlusion handling cho 2 tay de tranh co rut dot ngot.
+        if oid not in self.object_filters:
+            self.object_filters[oid] = {"prev_points": {}, "missing": {}}
+        state = self.object_filters[oid]
+        prev_points = state["prev_points"]
+        missing = state["missing"]
+
+        left_arm_hold_frames = getattr(config, "LEFT_ARM_HOLD_FRAMES", 2)
+        left_arm_conf_floor = getattr(config, "LEFT_ARM_CONF_FLOOR", 0.18)
+        right_arm_hold_frames = getattr(config, "RIGHT_ARM_HOLD_FRAMES", 2)
+        right_arm_conf_floor = getattr(config, "RIGHT_ARM_CONF_FLOOR", 0.18)
+
+        bx = by = bw = bh = None
+        if bbox and len(bbox) >= 4:
+            bx, by, bw, bh = bbox[0], bbox[1], bbox[2], bbox[3]
+
         for i in range(num_points):
             base = i * stride
-            target_x = kpts[base]
-            target_y = kpts[base+1]
-            conf = kpts[base+2] if stride == 3 else 1.0
+            x = float(kpts[base])
+            y = float(kpts[base + 1])
+            conf = float(kpts[base + 2]) if stride == 3 else 1.0
 
-            # --- [SMART ASYMMETRIC CONFIDENCE (Fast Attack, Slow Decay)] ---
-            smooth_conf = conf
-            is_reconstructed = False
-            
-            if stride == 3:
-                conf_key = f"{base}_conf"
-                prev_conf = filters.get(conf_key, conf)
-                
-                if conf == 0.0:
-                    # [PHANH KHẨN CẤP] Từ ai.py: Bắt buộc tuân thủ
-                    smooth_conf = 0.0
-                elif conf == 0.85 or (conf > 0.75 and prev_conf < 0.2):
-                    # [KINEMATIC BYPASS] Tái tạo động học: Tin tưởng tuyệt đối
-                    smooth_conf = conf
-                    is_reconstructed = True
-                elif conf >= prev_conf:
-                    # [FAST ATTACK] Tín hiệu tốt lên -> Bắt nhịp nhanh (Quán tính thấp: 30% cũ, 70% mới)
-                    # Giúp khung xương lập tức bám sát khi thoát khỏi vùng nhiễu
-                    smooth_conf = prev_conf * 0.30 + conf * 0.70
+            # Khop tay trai/phai:
+            # - Left: 7 (L-Elb), 9 (L-Wri)
+            # - Right: 8 (R-Elb), 10 (R-Wri)
+            # Neu AI mat diem ngan han -> giu diem cu trong vai frame.
+            if stride == 3 and i in (7, 8, 9, 10):
+                if i in (7, 9):
+                    conf_floor = left_arm_conf_floor
+                    hold_frames = left_arm_hold_frames
                 else:
-                    # [SLOW DECAY] Tín hiệu rớt đột ngột -> Rất lỳ lợm (Quán tính cao: 95% cũ, 5% mới)
-                    # Xóa sổ hiện tượng nhấp nháy/giật cục khi AI mất nét tạm thời
-                    smooth_conf = prev_conf * 0.95 + conf * 0.05
-                    
-                filters[conf_key] = smooth_conf
+                    conf_floor = right_arm_conf_floor
+                    hold_frames = right_arm_hold_frames
 
-            if base not in filters:
-                filters[base] = OneEuroFilter(t, target_x, min_cutoff=min_cutoff, beta=beta, d_cutoff=self.d_cutoff)
-            if (base+1) not in filters:
-                filters[base+1] = OneEuroFilter(t, target_y, min_cutoff=min_cutoff, beta=beta, d_cutoff=self.d_cutoff)
+                if conf <= conf_floor:
+                    prev = prev_points.get(i)
+                    miss_count = missing.get(i, 0)
+                    if prev and miss_count < hold_frames:
+                        x, y, prev_conf = prev
+                        conf = max(conf_floor, prev_conf * 0.75)
+                        missing[i] = miss_count + 1
+                    else:
+                        missing[i] = miss_count + 1
+                else:
+                    missing[i] = 0
 
-            # --- [DYNAMIC BIOLOGICAL CLAMPING] ---
-            if base in filters and (base+1) in filters:
-                # Nếu ai.py ép conf=0 (tay T-Rex), khóa bán kính tối đa xuống cực nhỏ (1%)
-                # Nếu bình thường, cho phép di chuyển 15%
-                max_step = bbox_h * (0.01 if smooth_conf == 0.0 else 0.15)
-                
-                dx = target_x - filters[base].x_prev
-                dy = target_y - filters[base+1].x_prev
-                dist = math.sqrt(dx**2 + dy**2)
-                
-                if dist > max_step:
-                    ratio = max_step / dist
-                    target_x = filters[base].x_prev + dx * ratio
-                    target_y = filters[base+1].x_prev + dy * ratio
+            if stride == 3 and conf < config.POSE_CONF_THRESHOLD:
+                conf = 0.0
 
-            filters[base].d_cutoff = self.d_cutoff
-            filters[base+1].d_cutoff = self.d_cutoff
+            if bx is not None:
+                x = max(bx, min(bx + bw - 1, x))
+                y = max(by, min(by + bh - 1, y))
 
-            # Tính toán OneEuro theo smooth_conf
-            c_weight = max(0.0, min(1.0, smooth_conf))
-            c_min_cutoff = min_cutoff * (0.05 + 0.95 * c_weight)
-            c_beta = beta * (0.05 + 0.95 * c_weight)
+            if stride == 3 and conf > 0.0:
+                prev_points[i] = (x, y, conf)
 
-            filters[base].min_cutoff = c_min_cutoff
-            filters[base].beta = c_beta
-            filters[base+1].min_cutoff = c_min_cutoff
-            filters[base+1].beta = c_beta
-
-            fx = filters[base](t, target_x)
-            fy = filters[base+1](t, target_y)
-
-            if bbox and len(bbox) >= 4:
-                bx, by, bw, bh = bbox[0], bbox[1], bbox[2], bbox[3]
-                fx = max(bx, min(bx + bw - 1, fx))
-                fy = max(by, min(by + bh - 1, fy))
-            
-            filtered_kpts.extend([fx, fy])
-            
+            filtered_kpts.extend([x, y])
             if stride == 3:
-                filtered_kpts.append(smooth_conf)
-                
+                filtered_kpts.append(conf)
+
         return filtered_kpts

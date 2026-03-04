@@ -1,5 +1,6 @@
 import math
 import time
+import config
 
 class GestureFSM:
     """
@@ -139,20 +140,28 @@ class PoseEstimator:
         VERT_MIN = 0.25 * torso_len   # Độ cao tối thiểu (Cổ tay > Khuỷu)
         
         # [T-REX FILTER] Ngưỡng vươn tay tối thiểu (Chống tay co rút do nhiễu)
-        MIN_ARM_EXT = 0.35 * torso_len
+        high_wrist_conf_min = getattr(config, "HIGH_HAND_WRIST_CONF_MIN", 0.12)
+        high_head_margin = getattr(config, "HIGH_HAND_HEAD_MARGIN_RATIO", 0.10) * torso_len
+        high_elbow_lift_ratio = getattr(config, "HIGH_HAND_ELBOW_LIFT_RATIO", 0.20)
+        MIN_ARM_EXT = getattr(config, "HIGH_HAND_EXT_RATIO", 0.30) * torso_len
+        # Nới riêng cho trạng thái giơ cao tay trái (dễ bị co rút do che khuất).
+        MIN_ARM_EXT_HIGH_LEFT = getattr(config, "HIGH_HAND_EXT_RATIO_LOOSE", 0.16) * torso_len
+        # Nới riêng cho trạng thái giơ cao tay phải (dễ bị co rút do che khuất).
+        MIN_ARM_EXT_HIGH_RIGHT = getattr(config, "HIGH_HAND_EXT_RATIO_LOOSE", 0.16) * torso_len
 
         # --- LOGIC BOOLEAN (RAW) ---
         
         # --- TAY TRÁI (Left Arm: 5-7-9) ---
         raw_l_vuong = raw_l_ngang = raw_l_cao = False
-        if confs[5] > MIN_CONF and confs[7] > MIN_CONF and confs[9] > MIN_CONF:
+        if confs[5] > MIN_CONF and confs[7] > MIN_CONF and confs[9] > high_wrist_conf_min:
             y_elb, x_elb = kp[7][1], kp[7][0]
             y_wri, x_wri = kp[9][1], kp[9][0]
 
             # [T-REX CHECK] Kiểm tra độ vươn tay
             arm_l_dist = dist(kp[5], kp[9])
             
-            if arm_l_dist > MIN_ARM_EXT:
+            left_high_candidate = (y_wri < (head_y + high_head_margin) and y_elb < y_sho_l - (HORIZ_TOL * high_elbow_lift_ratio))
+            if arm_l_dist > MIN_ARM_EXT or (left_high_candidate and arm_l_dist > MIN_ARM_EXT_HIGH_LEFT):
                 # 1. Check VUONG (Square): Khuỷu ngang Vai, Cổ tay dựng đứng
                 # [PRIORITY 1] Ưu tiên bắt dáng vuông góc trước để tránh nhầm với giơ cao
                 if abs(y_elb - y_sho_l) < HORIZ_TOL and y_wri < y_elb - VERT_MIN:
@@ -166,19 +175,20 @@ class PoseEstimator:
 
                 # 3. Check CAO (High): Cổ tay cao hơn Đầu VÀ Khuỷu tay cao hơn Vai
                 # [STRICT] Siết chặt điều kiện: Khuỷu tay phải nâng lên rõ rệt
-                elif y_wri < head_y and y_elb < y_sho_l - (HORIZ_TOL / 2):
+                elif y_wri < (head_y + high_head_margin) and y_elb < y_sho_l - (HORIZ_TOL * high_elbow_lift_ratio):
                     raw_l_cao = True
 
         # --- TAY PHẢI (Right Arm: 6-8-10) ---
         raw_r_vuong = raw_r_ngang = raw_r_cao = False
-        if confs[6] > MIN_CONF and confs[8] > MIN_CONF and confs[10] > MIN_CONF:
+        if confs[6] > MIN_CONF and confs[8] > MIN_CONF and confs[10] > high_wrist_conf_min:
             y_elb, x_elb = kp[8][1], kp[8][0]
             y_wri, x_wri = kp[10][1], kp[10][0]
 
             # [T-REX CHECK] Kiểm tra độ vươn tay
             arm_r_dist = dist(kp[6], kp[10])
 
-            if arm_r_dist > MIN_ARM_EXT:
+            right_high_candidate = (y_wri < (head_y + high_head_margin) and y_elb < y_sho_r - (HORIZ_TOL * high_elbow_lift_ratio))
+            if arm_r_dist > MIN_ARM_EXT or (right_high_candidate and arm_r_dist > MIN_ARM_EXT_HIGH_RIGHT):
                 # 1. Check VUONG (Square): Khuỷu ngang Vai, Cổ tay dựng đứng
                 if abs(y_elb - y_sho_r) < HORIZ_TOL and y_wri < y_elb - VERT_MIN:
                     raw_r_vuong = True
@@ -190,7 +200,7 @@ class PoseEstimator:
                         raw_r_ngang = True
 
                 # 3. Check CAO (High): Cổ tay cao hơn Đầu VÀ Khuỷu tay cao hơn Vai
-                elif y_wri < head_y and y_elb < y_sho_r - (HORIZ_TOL / 2):
+                elif y_wri < (head_y + high_head_margin) and y_elb < y_sho_r - (HORIZ_TOL * high_elbow_lift_ratio):
                     raw_r_cao = True
 
         # --- EMERGENCY STOP (Cheo Tay) ---

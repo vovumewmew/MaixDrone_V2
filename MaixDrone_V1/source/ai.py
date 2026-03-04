@@ -77,15 +77,16 @@ class AIEngine:
                 bw = obj.w * scale_x
                 bh = obj.h * scale_y
 
-                # [PADDING] Mở rộng Box để bao quát tay giơ cao
-                pad_w_val = bw * 0.25  # Mở rộng chiều ngang 10%
-                pad_h_val = bh * 0.25  # [HACK] Mở rộng chiều dọc lên hẳn 25%
+                # [PADDING ACCURACY-FIRST] Uu tien khung tay gio cao:
+                # mo rong manh o phia tren, mo rong vua phai 2 ben.
+                pad_w_val = bw * 0.18
+                pad_top_val = bh * 0.42
+                pad_bottom_val = bh * 0.12
 
-                # Tùy chỉnh dịch tâm Box lên phía trên một chút (để hứng cái tay)
                 bx -= pad_w_val / 2
-                by -= pad_h_val * 0.7  # [HACK] Dịch phần lớn phần đệm lên trên đầu
+                by -= pad_top_val
                 bw += pad_w_val
-                bh += pad_h_val
+                bh += (pad_top_val + pad_bottom_val)
 
                 # Map Points (Lấy dữ liệu trực tiếp từ AI Global)
                 final_points = []
@@ -101,19 +102,20 @@ class AIEngine:
                         py = obj.points[base+1] * scale_y
                         conf = obj.points[base+2] if stride == 3 else 1.0
 
-                        # [CORNER TRAP] Lọc điểm ma kẹt ở góc trên BBox
-                        # [DYNAMIC] Dùng 8% kích thước cạnh lớn nhất của Box làm bán kính góc kẹt
-                        if conf > 0:
-                            corner_thresh = max(bw, bh) * 0.08
+                        # Kẹp biên ảnh trước khi xử lý tiếp để giảm outlier.
+                        px = max(0.0, min(img_hd.width() - 1, px))
+                        py = max(0.0, min(img_hd.height() - 1, py))
+
+                        # [CORNER TRAP SAFER] Không triệt khớp tay (7,8,9,10)
+                        # để tránh co rút tay khi giơ cao chạm góc bbox.
+                        if conf > 0 and i not in (7, 8, 9, 10) and conf < 0.35:
+                            corner_thresh = max(bw, bh) * 0.06
                             d_tl = math.sqrt((px - bx)**2 + (py - by)**2)
                             d_tr = math.sqrt((px - (bx + bw))**2 + (py - by)**2)
                             if d_tl < corner_thresh or d_tr < corner_thresh:
                                 conf = 0.0
 
                         final_points.extend([px, py, conf])
-
-                # [EDGE FIX] Ràng buộc chiều dài xương (Bone Length Constraint)
-                self._apply_bone_constraint(final_points)
 
                 # Convert sang int và kẹp biên
                 bx = int(max(0, bx))
@@ -134,44 +136,3 @@ class AIEngine:
             print(f"⚠️ AI Error: {e}")
         
         return img_hd, results
-
-    def _apply_bone_constraint(self, points):
-        """
-        [KINEMATIC EXTRAPOLATION] Tự động tái tạo cẳng tay khi AI bị mù hoặc vẽ dị dạng (T-Rex).
-        """
-        def fix_arm_kinematics(sho_idx, elb_idx, wri_idx):
-            base_s, base_e, base_w = sho_idx * 3, elb_idx * 3, wri_idx * 3
-            
-            # Kiểm tra an toàn index
-            if base_w + 2 >= len(points): return
-            
-            sho_x, sho_y, sho_c = points[base_s], points[base_s+1], points[base_s+2]
-            elb_x, elb_y, elb_c = points[base_e], points[base_e+1], points[base_e+2]
-            wri_x, wri_y, wri_c = points[base_w], points[base_w+1], points[base_w+2]
-
-            # Chỉ nội suy nếu AI vẫn đang nhìn thấy Vai và Khuỷu tay tương đối rõ
-            if sho_c > 0.25 and elb_c > 0.25:
-                upper_arm = math.sqrt((elb_x - sho_x)**2 + (elb_y - sho_y)**2)
-                
-                if upper_arm > 10.0: # Tránh chia cho 0 hoặc nhiễu quá nhỏ
-                    lower_arm = math.sqrt((wri_x - elb_x)**2 + (wri_y - elb_y)**2)
-                    ratio = lower_arm / upper_arm
-                    
-                    # Nếu tay bị rút (ratio < 0.75) HOẶC mất dấu hoàn toàn (conf < 0.15)
-                    if ratio < 0.75 or wri_c < 0.15:
-                        # TÍNH TOÁN ĐỘNG HỌC (Phóng vector)
-                        dx = elb_x - sho_x
-                        dy = elb_y - sho_y
-                        
-                        # Cẳng tay thực tế thường dài bằng ~1.3 lần bắp tay
-                        points[base_w] = elb_x + dx * 1.1
-                        points[base_w+1] = elb_y + dy * 1.1
-                        
-                        # Gán Conf = 0.5 (Đủ lớn để FSM nhận diện "Giơ tay", 
-                        # nhưng đủ nhỏ để OneEuroFilter biết đây là dữ liệu dự đoán)
-                        points[base_w+2] = 0.5 
-
-        # Áp dụng cho Tay Trái (Vai: 5, Khuỷu: 7, Cổ tay: 9)
-        fix_arm_kinematics(5, 7, 9)
-        # Áp dụng cho Tay Phải (Vai: 6, Khuỷu: 8, Cổ tay: 10)
-        fix_arm_kinematics(6, 8, 10)

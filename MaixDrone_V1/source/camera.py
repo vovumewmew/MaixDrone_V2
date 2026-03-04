@@ -21,12 +21,12 @@ class CameraManager:
                 # 1. Hạ độ sáng tổng thể (Trị số thường từ -2 đến 2, mặc định 0)
                 # Hạ xuống số âm để các mảng trắng của trần nhà/đèn bớt chói lóa
                 if hasattr(self.cam, 'set_brightness'):
-                    self.cam.set_brightness(-1)
+                    self.cam.set_brightness(0) # [RESET] Về 0 để lấy lại màu sắc
 
                 # 2. Tăng độ tương phản (Trị số thường từ -2 đến 2, mặc định 0)
                 # Giúp viền cánh tay tách biệt rõ ràng hơn so với phông nền
                 if hasattr(self.cam, 'set_contrast'):
-                    self.cam.set_contrast(1)
+                    self.cam.set_contrast(0) # [RESET] Về 0 để tránh mất màu
                 # 3. [Nâng cao] Khóa phơi sáng (Nếu API của MaixPy version bạn hỗ trợ)
                 # Tắt Auto Exposure và ép phơi sáng ở mức thấp
                 # if hasattr(self.cam, 'set_auto_exposure'):

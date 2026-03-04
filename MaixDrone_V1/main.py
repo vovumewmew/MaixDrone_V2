@@ -16,7 +16,7 @@ except ImportError:
 
 from source.ai import AIEngine
 from source.stream import StreamServer, MessageServer # [UPDATE] Import thêm MessageServer
-from source.ui import UIManager
+from source.ui import HUD
 from source.tracker import ObjectTracker
 from source.tinker_client import TinkerClient # [NEW] Import Client gửi tin
 
@@ -46,12 +46,30 @@ def connect_wifi_linux(ssid, password):
     os.system("udhcpc -i wlan0") # Xin IP
     print("✅ Wifi setup done.")
 
+def resolve_network_mode():
+    mode = str(getattr(config, "NETWORK_MODE", "wifi")).strip().lower()
+    if mode not in ("wifi", "lan"):
+        print(f"⚠️ NETWORK_MODE không hợp lệ: {mode}. Fallback -> wifi")
+        return "wifi"
+    return mode
+
+def get_tinker_ip_by_mode(mode):
+    if mode == "lan":
+        return getattr(config, "TINKER_IP_LAN", getattr(config, "TINKER_IP", ""))
+    return getattr(config, "TINKER_IP_WIFI", getattr(config, "TINKER_IP", ""))
+
 def main():
     print("--- 🚁 MAIX DRONE V12: NETWORK MODE (LCD + SOCKET) ---")
     print("⚡ MODE: REAL-TIME FULL PROCESSING (EVERY FRAME)")
-    
-    # [AUTO WIFI] Tự động kết nối mạng Lab khi chạy chương trình
-    connect_wifi_linux(config.WIFI_SSID, config.WIFI_PASS)
+
+    network_mode = resolve_network_mode()
+    print(f"🌐 NETWORK_MODE = {network_mode}")
+
+    # Chỉ khi mode = wifi mới auto connect wlan0.
+    if network_mode == "wifi":
+        connect_wifi_linux(config.WIFI_SSID, config.WIFI_PASS)
+    else:
+        print("🔌 LAN mode: bỏ qua bước auto-connect Wi-Fi.")
     
     # Dùng font mặc định (nhanh nhất)
     image.set_default_font("sourcehansans")
@@ -67,7 +85,9 @@ def main():
     # [NEW] Khởi tạo Client gửi dữ liệu sang Tinkerboard
     tinker_client = None
     if config.ENABLE_TINKER:
-        tinker_client = TinkerClient(config.TINKER_IP, config.TINKER_PORT)
+        tinker_ip = get_tinker_ip_by_mode(network_mode)
+        print(f"🔗 Tinker target: {tinker_ip}:{config.TINKER_PORT}")
+        tinker_client = TinkerClient(tinker_ip, config.TINKER_PORT)
     
     ai_engine = AIEngine(config.MODEL_PATH, config.CONF_THRESHOLD)
     hud = HUD(config.CAM_WIDTH, config.CAM_HEIGHT)
