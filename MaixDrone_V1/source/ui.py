@@ -85,16 +85,18 @@ class HUD:
                 if gestures:
                     g_text = " + ".join(gestures)
                     
-                    # [NOTIFY] Hiển thị thông báo trạng thái hệ thống
+                    # [NOTIFY] Hien thi thong bao dang Action n (chi 5 tu the)
                     temp_msg = None
                     if "Trai Cao" in gestures:
-                        temp_msg = "shortage of material"
+                        temp_msg = "Action 1"
                     elif "Phai Cao" in gestures:
-                        temp_msg = "technical or quality issue"
+                        temp_msg = "Action 2"
+                    elif "Trai Ngang" in gestures:
+                        temp_msg = "Action 3"
+                    elif "Phai Ngang" in gestures:
+                        temp_msg = "Action 4"
                     elif "Cheo Tay Tren Dau" in gestures:
-                        temp_msg = "emergency stop"
-                    elif "Vay Tay Phai" in gestures:
-                        temp_msg = "urgent attention"
+                        temp_msg = "Action 5"
                     
                     # [LOGIC] Chỉ hiển thị thông báo của người có độ tin cậy Pose cao nhất
                     if temp_msg and pose_score > current_max_score:

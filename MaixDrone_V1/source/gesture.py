@@ -1,5 +1,4 @@
 import math
-import time
 import config
 
 class GestureFSM:
@@ -53,11 +52,13 @@ class PoseEstimator:
         self.fsm_l_vuong = GestureFSM("Trai Vuong", trigger_frames=4, hold_frames=8)
         self.fsm_l_ngang = GestureFSM("Trai Ngang", trigger_frames=4, hold_frames=8)
         self.fsm_l_cao   = GestureFSM("Trai Cao",   trigger_frames=4, hold_frames=8)
+        self.fsm_l_cao_vuong = GestureFSM("Trai Cao Vuong", trigger_frames=4, hold_frames=8)
         
         # 3. Tay Phải
         self.fsm_r_vuong = GestureFSM("Phai Vuong", trigger_frames=4, hold_frames=8)
         self.fsm_r_ngang = GestureFSM("Phai Ngang", trigger_frames=4, hold_frames=8)
         self.fsm_r_cao   = GestureFSM("Phai Cao",   trigger_frames=4, hold_frames=8)
+        self.fsm_r_cao_vuong = GestureFSM("Phai Cao Vuong", trigger_frames=4, hold_frames=8)
 
     def update(self, keypoints):
         """
@@ -80,197 +81,182 @@ class PoseEstimator:
         return final_status
 
     def _analyze(self, kp, confs):
-        # Helper: Vector Math
-        def dist(p1, p2): return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
-        
-        # Indices (COCO)
-        # 5,6: Shoulders | 11,12: Hips | 7,8: Elbows | 9,10: Wrists | 13,14: Knees
-        
+        def dist(p1, p2):
+            return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+
+        def angle_deg(p1, p2, p3):
+            v1x, v1y = p1[0] - p2[0], p1[1] - p2[1]
+            v2x, v2y = p3[0] - p2[0], p3[1] - p2[1]
+            n1 = math.sqrt(v1x * v1x + v1y * v1y)
+            n2 = math.sqrt(v2x * v2x + v2y * v2y)
+            if n1 < 1e-3 or n2 < 1e-3:
+                return None
+            cos_v = (v1x * v2x + v1y * v2y) / (n1 * n2)
+            cos_v = max(-1.0, min(1.0, cos_v))
+            return math.degrees(math.acos(cos_v))
+
+        def in_range(v, low, high):
+            return (v is not None) and (low < v < high)
+
         final_status = []
-        
-        # [SMART] Ngưỡng tin cậy tối thiểu để tính toán góc (tránh rác)
-        MIN_CONF = 0.35
 
-        # [SAFETY] Kiểm tra nếu thiếu các điểm quan trọng (Vai hoặc Hông)
-        # Nếu thiếu Hông (11, 12) -> Không thể tính Spine -> Bỏ qua Body State
-        has_hips = (confs[11] > MIN_CONF and confs[12] > MIN_CONF)
-        has_shoulders = (confs[5] > MIN_CONF and confs[6] > MIN_CONF)
+        base_min_conf = 0.24
+        has_hips = (confs[11] > base_min_conf and confs[12] > base_min_conf)
+        has_shoulders = (confs[5] > base_min_conf and confs[6] > base_min_conf)
 
-        # [SCALE] Chuẩn hoá theo kích thước cơ thể để ổn định mọi khoảng cách
         if has_hips and has_shoulders:
-            mid_sho = ((kp[5][0]+kp[6][0])/2, (kp[5][1]+kp[6][1])/2)
-            mid_hip = ((kp[11][0]+kp[12][0])/2, (kp[11][1]+kp[12][1])/2)
+            mid_sho = ((kp[5][0] + kp[6][0]) / 2, (kp[5][1] + kp[6][1]) / 2)
+            mid_hip = ((kp[11][0] + kp[12][0]) / 2, (kp[11][1] + kp[12][1]) / 2)
             torso_len = dist(mid_sho, mid_hip)
         elif has_shoulders:
             torso_len = dist(kp[5], kp[6])
         else:
             torso_len = 1.0
-        if torso_len < 1.0: torso_len = 1.0
+        torso_len = max(1.0, torso_len)
 
-        # --- 2. ARM STATE (Control Signals) ---
-        # [UPDATE] RELATIVE COORDINATE LOGIC (ZONE-BASED)
-        # Thay vì tính góc (dễ sai khi 2D), ta so sánh toạ độ Y và X tương đối.
-        
-        # 1. Xác định mốc chiều cao của "Đầu" (Head Level)
+        # Nguong conf dong theo kich thuoc doi tuong.
+        if torso_len < 55:
+            min_conf = 0.17
+            angle_margin = 8.0
+        elif torso_len < 85:
+            min_conf = 0.23
+            angle_margin = 5.0
+        else:
+            min_conf = 0.35
+            angle_margin = 2.0
+
+        wrist_conf_min = min(min_conf, float(getattr(config, "HIGH_HAND_WRIST_CONF_MIN", 0.12)) + 0.08)
+        arm_ext_min = max(0.14 * torso_len, float(getattr(config, "HIGH_HAND_EXT_RATIO_LOOSE", 0.16)) * torso_len)
+
         def get_head_y():
             candidates = []
-            # Ưu tiên: Mắt (1,2), Mũi (0), Tai (3,4)
             for idx in [1, 2, 0, 3, 4]:
-                if confs[idx] > MIN_CONF: candidates.append(kp[idx][1])
-            
-            if candidates: return sum(candidates) / len(candidates)
-            
-            # Fallback: Vai - 30% Thân người
-            if confs[5] > MIN_CONF and confs[6] > MIN_CONF:
-                return (kp[5][1] + kp[6][1])/2 - (torso_len * 0.3)
-            return 0
+                if confs[idx] > min_conf:
+                    candidates.append(kp[idx][1])
+            if candidates:
+                return sum(candidates) / float(len(candidates))
+            if confs[5] > min_conf and confs[6] > min_conf:
+                return (kp[5][1] + kp[6][1]) / 2.0 - (torso_len * 0.3)
+            return 0.0
 
-        head_y = get_head_y()
-        
-        # Toạ độ Vai (Làm mốc so sánh)
-        y_sho_l, x_sho_l = kp[5][1], kp[5][0] # Vai Trái (Image Right)
-        y_sho_r, x_sho_r = kp[6][1], kp[6][0] # Vai Phải (Image Left)
+        def classify_side(side):
+            if side == "left":
+                s_idx, h_idx, e_idx, w_idx = 5, 11, 7, 9
+            else:
+                s_idx, h_idx, e_idx, w_idx = 6, 12, 8, 10
 
-        l_status = None
-        r_status = None
+            if not (confs[s_idx] > min_conf and confs[h_idx] > min_conf and confs[e_idx] > min_conf and confs[w_idx] > wrist_conf_min):
+                return False, False, False, False
 
-        # [TUNING] Các ngưỡng so sánh (Dựa trên chiều dài thân người)
-        HORIZ_TOL = 0.25 * torso_len  # Dung sai cho ngang (+/- 25% thân)
-        EXT_MIN = 0.4 * torso_len     # Độ vươn tay tối thiểu ra ngoài
-        VERT_MIN = 0.25 * torso_len   # Độ cao tối thiểu (Cổ tay > Khuỷu)
-        
-        # [T-REX FILTER] Ngưỡng vươn tay tối thiểu (Chống tay co rút do nhiễu)
-        high_wrist_conf_min = getattr(config, "HIGH_HAND_WRIST_CONF_MIN", 0.12)
-        high_head_margin = getattr(config, "HIGH_HAND_HEAD_MARGIN_RATIO", 0.10) * torso_len
-        high_elbow_lift_ratio = getattr(config, "HIGH_HAND_ELBOW_LIFT_RATIO", 0.20)
-        MIN_ARM_EXT = getattr(config, "HIGH_HAND_EXT_RATIO", 0.30) * torso_len
-        # Nới riêng cho trạng thái giơ cao tay trái (dễ bị co rút do che khuất).
-        MIN_ARM_EXT_HIGH_LEFT = getattr(config, "HIGH_HAND_EXT_RATIO_LOOSE", 0.16) * torso_len
-        # Nới riêng cho trạng thái giơ cao tay phải (dễ bị co rút do che khuất).
-        MIN_ARM_EXT_HIGH_RIGHT = getattr(config, "HIGH_HAND_EXT_RATIO_LOOSE", 0.16) * torso_len
+            p_sho = kp[s_idx]
+            p_hip = kp[h_idx]
+            p_elb = kp[e_idx]
+            p_wri = kp[w_idx]
 
-        # --- LOGIC BOOLEAN (RAW) ---
-        
-        # --- TAY TRÁI (Left Arm: 5-7-9) ---
-        raw_l_vuong = raw_l_ngang = raw_l_cao = False
-        if confs[5] > MIN_CONF and confs[7] > MIN_CONF and confs[9] > high_wrist_conf_min:
-            y_elb, x_elb = kp[7][1], kp[7][0]
-            y_wri, x_wri = kp[9][1], kp[9][0]
+            # Chan false positive khi co tay bi co rut/manh.
+            if dist(p_sho, p_wri) < arm_ext_min:
+                return False, False, False, False
 
-            # [T-REX CHECK] Kiểm tra độ vươn tay
-            arm_l_dist = dist(kp[5], kp[9])
-            
-            left_high_candidate = (y_wri < (head_y + high_head_margin) and y_elb < y_sho_l - (HORIZ_TOL * high_elbow_lift_ratio))
-            if arm_l_dist > MIN_ARM_EXT or (left_high_candidate and arm_l_dist > MIN_ARM_EXT_HIGH_LEFT):
-                # 1. Check VUONG (Square): Khuỷu ngang Vai, Cổ tay dựng đứng
-                # [PRIORITY 1] Ưu tiên bắt dáng vuông góc trước để tránh nhầm với giơ cao
-                if abs(y_elb - y_sho_l) < HORIZ_TOL and y_wri < y_elb - VERT_MIN:
-                    raw_l_vuong = True
-                
-                # 2. Check NGANG (Horizontal): Khuỷu & Cổ tay ngang tầm Vai
-                elif abs(y_elb - y_sho_l) < HORIZ_TOL and abs(y_wri - y_sho_l) < HORIZ_TOL:
-                    # Check Vươn tay: Cổ tay phải nằm ngoài Vai (về phía bên phải ảnh)
-                    if x_wri > x_sho_l + EXT_MIN:
-                        raw_l_ngang = True
+            # Goc A: Khuyu - Vai - Hong
+            a = angle_deg(p_elb, p_sho, p_hip)
+            # Goc B: Co tay - Khuyu - Vai
+            b = angle_deg(p_wri, p_elb, p_sho)
+            # Goc C: Hong - Vai - Co tay
+            c = angle_deg(p_hip, p_sho, p_wri)
 
-                # 3. Check CAO (High): Cổ tay cao hơn Đầu VÀ Khuỷu tay cao hơn Vai
-                # [STRICT] Siết chặt điều kiện: Khuỷu tay phải nâng lên rõ rệt
-                elif y_wri < (head_y + high_head_margin) and y_elb < y_sho_l - (HORIZ_TOL * high_elbow_lift_ratio):
-                    raw_l_cao = True
+            a_vuong = in_range(a, 70 - angle_margin, 100 + angle_margin)
+            b_vuong = in_range(b, 60 - angle_margin, 100 + angle_margin)
+            b_ngang = in_range(b, 140 - angle_margin, 180)
+            c_cao = in_range(c, 140 - angle_margin, 180)
+            a_cao_vuong = in_range(a, 140 - angle_margin, 180)
+            b_cao_vuong = in_range(b, 75 - angle_margin, 90 + angle_margin)
 
-        # --- TAY PHẢI (Right Arm: 6-8-10) ---
-        raw_r_vuong = raw_r_ngang = raw_r_cao = False
-        if confs[6] > MIN_CONF and confs[8] > MIN_CONF and confs[10] > high_wrist_conf_min:
-            y_elb, x_elb = kp[8][1], kp[8][0]
-            y_wri, x_wri = kp[10][1], kp[10][0]
+            raw_vuong = a_vuong and b_vuong
+            raw_ngang = a_vuong and b_ngang
+            raw_cao = c_cao
+            raw_cao_vuong = a_cao_vuong and b_cao_vuong
 
-            # [T-REX CHECK] Kiểm tra độ vươn tay
-            arm_r_dist = dist(kp[6], kp[10])
+            # Priority: Cao Vuong > Ngang > Vuong > Cao
+            if raw_cao_vuong:
+                return False, False, True, True
+            if raw_ngang:
+                return False, True, False, False
+            if raw_vuong:
+                return True, False, False, False
+            if raw_cao:
+                return False, False, True, False
+            return False, False, False, False
 
-            right_high_candidate = (y_wri < (head_y + high_head_margin) and y_elb < y_sho_r - (HORIZ_TOL * high_elbow_lift_ratio))
-            if arm_r_dist > MIN_ARM_EXT or (right_high_candidate and arm_r_dist > MIN_ARM_EXT_HIGH_RIGHT):
-                # 1. Check VUONG (Square): Khuỷu ngang Vai, Cổ tay dựng đứng
-                if abs(y_elb - y_sho_r) < HORIZ_TOL and y_wri < y_elb - VERT_MIN:
-                    raw_r_vuong = True
-                
-                # 2. Check NGANG (Horizontal): Khuỷu & Cổ tay ngang tầm Vai
-                elif abs(y_elb - y_sho_r) < HORIZ_TOL and abs(y_wri - y_sho_r) < HORIZ_TOL:
-                    # Check Vươn tay: Cổ tay phải nằm ngoài Vai (về phía bên trái ảnh)
-                    if x_wri < x_sho_r - EXT_MIN:
-                        raw_r_ngang = True
+        raw_l_vuong, raw_l_ngang, raw_l_cao, raw_l_cao_vuong = classify_side("left")
+        raw_r_vuong, raw_r_ngang, raw_r_cao, raw_r_cao_vuong = classify_side("right")
 
-                # 3. Check CAO (High): Cổ tay cao hơn Đầu VÀ Khuỷu tay cao hơn Vai
-                elif y_wri < (head_y + high_head_margin) and y_elb < y_sho_r - (HORIZ_TOL * high_elbow_lift_ratio):
-                    raw_r_cao = True
-
-        # --- EMERGENCY STOP (Cheo Tay) ---
+        # [RESTORE] Logic goc cho "Cheo Tay Tren Dau" (giu nguyen nhu truoc).
         raw_crossed = False
-        
-        # [NEW LOGIC] Cheo Tay Tren Dau (Emergency Stop) - Hình học
-        # [OCCLUSION FIX] Bỏ qua conf Cổ tay (do bị che), chỉ cần Khuỷu tay rõ (0.2)
+        head_y = get_head_y()
         if has_shoulders and confs[7] > 0.2 and confs[8] > 0.2:
-            # Check 1: Khuỷu tay cao hơn Vai (Elbows Up) - Y càng nhỏ càng cao
             elbows_up = kp[7][1] < kp[5][1] and kp[8][1] < kp[6][1]
-            
-            # Check 2: Cổ tay cao hơn Đầu (Wrists Up)
-            # Dù conf thấp, vẫn dùng toạ độ (giả định là đã được lọc/dự đoán từ tracker)
             wrists_up = kp[9][1] < head_y and kp[10][1] < head_y
-            
-            # Check 3: Hai tay gần nhau (Wrist Dist)
             wrist_dist = dist(kp[9], kp[10])
             elbow_dist = dist(kp[7], kp[8])
-            
-            # Tham chiếu: Chiều rộng vai hoặc Chiều dài thân
             ref_len = max(dist(kp[5], kp[6]), torso_len)
-            
-            # [STRICT] Khoảng cách phải nhỏ (0.8) và Khuỷu tay phải đưa lên
             if elbows_up and wrists_up and (wrist_dist < elbow_dist * 0.8) and (wrist_dist < ref_len * 0.7):
                 raw_crossed = True
 
-        # --- FSM UPDATE (Cập nhật trạng thái máy) ---
-        # Truyền tín hiệu thô vào FSM để lọc nhiễu
-        
-        # 1. Emergency
         act_crossed = self.fsm_emergency.update(raw_crossed)
-        
+
         if act_crossed:
-            # [MUTUAL EXCLUSION] Nếu Emergency kích hoạt, Reset toàn bộ các FSM khác ngay lập tức
             self.fsm_l_vuong.reset(); act_l_vuong = False
             self.fsm_l_ngang.reset(); act_l_ngang = False
-            self.fsm_l_cao.reset();   act_l_cao = False
+            self.fsm_l_cao.reset(); act_l_cao = False
+            self.fsm_l_cao_vuong.reset(); act_l_cao_vuong = False
+
             self.fsm_r_vuong.reset(); act_r_vuong = False
             self.fsm_r_ngang.reset(); act_r_ngang = False
-            self.fsm_r_cao.reset();   act_r_cao = False
+            self.fsm_r_cao.reset(); act_r_cao = False
+            self.fsm_r_cao_vuong.reset(); act_r_cao_vuong = False
         else:
-            # 2. Left Arm
             act_l_vuong = self.fsm_l_vuong.update(raw_l_vuong)
             act_l_ngang = self.fsm_l_ngang.update(raw_l_ngang)
-            act_l_cao   = self.fsm_l_cao.update(raw_l_cao)
-            
-            # 3. Right Arm
+            act_l_cao = self.fsm_l_cao.update(raw_l_cao)
+            act_l_cao_vuong = self.fsm_l_cao_vuong.update(raw_l_cao_vuong)
+
             act_r_vuong = self.fsm_r_vuong.update(raw_r_vuong)
             act_r_ngang = self.fsm_r_ngang.update(raw_r_ngang)
-            act_r_cao   = self.fsm_r_cao.update(raw_r_cao)
+            act_r_cao = self.fsm_r_cao.update(raw_r_cao)
+            act_r_cao_vuong = self.fsm_r_cao_vuong.update(raw_r_cao_vuong)
 
-        # --- PRIORITY & COMBINATION (Xử lý xung đột) ---
-        
         if act_crossed:
+            # Duy tri ten cu de tuong thich UI/Socket mapping.
             final_status.append("Cheo Tay Tren Dau")
-            # Nếu đang Emergency thì bỏ qua các tay khác
+            return final_status
+
+        # Tang dung cho to hop: Cao Vuong duoc tinh la Cao.
+        act_l_cao_total = act_l_cao or act_l_cao_vuong
+        act_r_cao_total = act_r_cao or act_r_cao_vuong
+
+        if act_l_ngang and act_r_ngang:
+            final_status.append("Hai Tay Ngang")
+        elif act_l_cao_total and act_r_cao_total:
+            final_status.append("Tay Chu V")
         else:
-            # Logic kết hợp (Combined) dựa trên trạng thái Active của FSM
-            if act_l_ngang and act_r_ngang:
-                final_status.append("Hai Tay Ngang")
-            elif act_l_cao and act_r_cao:
-                final_status.append("Tay Chu V")
-            else:
-                # Trạng thái đơn lẻ
-                if act_l_vuong: final_status.append("Trai Vuong")
-                elif act_l_ngang: final_status.append("Trai Ngang")
-                elif act_l_cao: final_status.append("Trai Cao")
-                
-                if act_r_vuong: final_status.append("Phai Vuong")
-                elif act_r_ngang: final_status.append("Phai Ngang")
-                elif act_r_cao: final_status.append("Phai Cao")
-        
+            if act_l_cao_vuong:
+                final_status.append("Trai Cao Vuong")
+                final_status.append("Trai Cao")
+            elif act_l_vuong:
+                final_status.append("Trai Vuong")
+            elif act_l_ngang:
+                final_status.append("Trai Ngang")
+            elif act_l_cao_total:
+                final_status.append("Trai Cao")
+
+            if act_r_cao_vuong:
+                final_status.append("Phai Cao Vuong")
+                final_status.append("Phai Cao")
+            elif act_r_vuong:
+                final_status.append("Phai Vuong")
+            elif act_r_ngang:
+                final_status.append("Phai Ngang")
+            elif act_r_cao_total:
+                final_status.append("Phai Cao")
+
         return final_status

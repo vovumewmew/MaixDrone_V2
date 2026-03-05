@@ -66,21 +66,23 @@ class TinkerClient:
         if time.time() - self.last_send_time < 1.0:
             return
 
-        # [UPDATE] Chỉ gửi các thông báo đặc biệt (Special Notifications)
+        # [UPDATE] Chi gui thong bao theo Action n (chi 5 tu the)
         messages = []
         for obj in objects:
             gestures = obj.get('gestures', [])
             
-            # Mapping cử chỉ sang thông báo đặc biệt (giống logic trong ui.py)
+            # Mapping cu chi -> Action n (dong bo voi ui.py)
             special_msg = None
-            if "Cheo Tay Tren Dau" in gestures:
-                special_msg = "EMERGENCY STOP"
-            elif "Vay Tay Phai" in gestures:
-                special_msg = "URGENT ATTENTION"
-            elif "Trai Cao" in gestures:
-                special_msg = "SHORTAGE OF MATERIAL"
+            if "Trai Cao" in gestures:
+                special_msg = "Action 1"
             elif "Phai Cao" in gestures:
-                special_msg = "TECHNICAL OR QUALITY ISSUE"
+                special_msg = "Action 2"
+            elif "Trai Ngang" in gestures:
+                special_msg = "Action 3"
+            elif "Phai Ngang" in gestures:
+                special_msg = "Action 4"
+            elif "Cheo Tay Tren Dau" in gestures:
+                special_msg = "Action 5"
             
             if special_msg:
                 # [UPDATE] Thêm thời gian gửi từ MaixCam (Send Time)

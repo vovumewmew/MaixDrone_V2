@@ -139,7 +139,8 @@ class ObjectTracker:
             raw_points = res.get('points', [])
             if raw_points:
                 filtered_points = self.filter.filter_kpts(oid, t_now, raw_points, bbox=raw_box)
-                pose_input_points = raw_points
+                # Gesture/ST-GCN uu tien diem da hieu chinh de tranh mat tay khi gio cao.
+                pose_input_points = filtered_points if filtered_points else raw_points
                 quality_points = filtered_points if filtered_points else raw_points
                 pose_score = self._calculate_quality(raw_points, quality_points, res['score'], raw_box[3])
             else:
