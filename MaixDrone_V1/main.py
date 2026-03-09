@@ -1,191 +1,183 @@
-# main.py
+import re
 import time
-import gc
-import os       # [NEW] Để chạy lệnh hệ thống (Wifi)
-import sys      # [NEW] Để đọc dữ liệu từ Serial (stdin)
-import select   # [NEW] Để kiểm tra dữ liệu không chặn (Non-blocking)
-import config
-from maix import display, image # [UPDATE] Import thêm image để load font
-from source.camera import CameraManager
 
-try:
-    import psutil # Dùng cho CPython trên Linux
-    HAS_PSUTIL = True
-except ImportError:
-    HAS_PSUTIL = False
+import config
+from maix import app, camera, display
 
 from source.ai import AIEngine
-from source.stream import StreamServer, MessageServer # [UPDATE] Import thêm MessageServer
-from source.ui import HUD
 from source.tracker import ObjectTracker
-from source.tinker_client import TinkerClient # [NEW] Import Client gửi tin
+from source.tinker_client import TinkerClient
+from source.ui import HUD
 
-def connect_wifi_linux(ssid, password):
-    """Hàm tự động kết nối Wifi cho Linux nhúng (MaixCam)"""
-    # [OPTIMIZE] Kiểm tra nhanh: Nếu đã có IP thì không cần kết nối lại (tiết kiệm 5s khởi động)
+class CPUMeter:
+    def __init__(self):
+        self.prev_total = None
+        self.prev_idle = None
+
+    def read_percent(self):
+        try:
+            with open("/proc/stat", "r", encoding="utf-8") as f:
+                parts = f.readline().split()
+            vals = [int(x) for x in parts[1:8]]
+            idle = vals[3] + vals[4]
+            total = sum(vals)
+        except Exception:
+            return 0.0
+
+        if self.prev_total is None:
+            self.prev_total = total
+            self.prev_idle = idle
+            return 0.0
+
+        d_total = total - self.prev_total
+        d_idle = idle - self.prev_idle
+        self.prev_total = total
+        self.prev_idle = idle
+
+        if d_total <= 0:
+            return 0.0
+        return max(0.0, min(100.0, (1.0 - d_idle / d_total) * 100.0))
+
+
+def read_ram():
     try:
-        # ifconfig wlan0 thường chứa dòng "inet addr:10.x.x.x" hoặc "inet 10.x.x.x"
-        if_status = os.popen("ifconfig wlan0").read()
-        if "inet " in if_status:
-            print(f"✅ Wifi đã có IP (Sẵn sàng). Bỏ qua bước kết nối lại.")
-            return
+        mem = {}
+        with open("/proc/meminfo", "r", encoding="utf-8") as f:
+            for line in f:
+                if ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                mem[key.strip()] = int(value.strip().split()[0])
+        total = mem.get("MemTotal", 0)
+        available = mem.get("MemAvailable", 0)
+        used = max(0, total - available)
+        pct = (used * 100.0 / total) if total > 0 else 0.0
+        return used / 1024.0, total / 1024.0, pct
     except Exception:
-        pass # Nếu lỗi thì cứ chạy kết nối bình thường
+        return 0.0, 0.0, 0.0
 
-    print(f"📶 Auto Connecting to Wifi: {ssid}...")
-    # 1. Tạo file cấu hình
-    conf_content = f'ctrl_interface=/var/run/wpa_supplicant\nupdate_config=1\n\nnetwork={{\n    ssid="{ssid}"\n    psk="{password}"\n}}\n'
-    os.system(f"echo '{conf_content}' > /etc/wpa_supplicant.conf")
-    
-    # 2. Khởi động lại tiến trình Wifi
-    os.system("killall wpa_supplicant 2> /dev/null")
-    os.system("ifconfig wlan0 down && ifconfig wlan0 up")
-    time.sleep(1)
-    os.system("wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant.conf")
-    time.sleep(2) # Chờ kết nối
-    os.system("udhcpc -i wlan0") # Xin IP
-    print("✅ Wifi setup done.")
 
-def resolve_network_mode():
-    mode = str(getattr(config, "NETWORK_MODE", "wifi")).strip().lower()
-    if mode not in ("wifi", "lan"):
-        print(f"⚠️ NETWORK_MODE không hợp lệ: {mode}. Fallback -> wifi")
-        return "wifi"
-    return mode
+class NPUMeter:
+    CANDIDATE_PATHS = [
+        "/sys/kernel/debug/cvi-npu/load",
+        "/sys/class/devfreq/cvi-npu/load",
+        "/proc/npu_usage",
+        "/proc/cvitek/npu",
+    ]
 
-def get_tinker_ip_by_mode(mode):
-    if mode == "lan":
-        return getattr(config, "TINKER_IP_LAN", getattr(config, "TINKER_IP", ""))
-    return getattr(config, "TINKER_IP_WIFI", getattr(config, "TINKER_IP", ""))
+    def __init__(self):
+        self.ema_util = 0.0
+
+    def _read_direct_npu_util(self):
+        for path in self.CANDIDATE_PATHS:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    txt = f.read()
+                match = re.search(r"([0-9]+(?:\.[0-9]+)?)", txt)
+                if not match:
+                    continue
+                value = float(match.group(1))
+                if value <= 1.0:
+                    value *= 100.0
+                return max(0.0, min(100.0, value))
+            except Exception:
+                continue
+        return None
+
+    def update(self, frame_ms, infer_ms):
+        direct = self._read_direct_npu_util()
+        if direct is not None:
+            util = direct
+        else:
+            util = (infer_ms * 100.0 / frame_ms) if frame_ms > 0 else 0.0
+            util = max(0.0, min(100.0, util))
+
+        self.ema_util = self.ema_util * 0.8 + util * 0.2
+        return self.ema_util
+
 
 def main():
-    print("--- 🚁 MAIX DRONE V12: NETWORK MODE (LCD + SOCKET) ---")
-    print("⚡ MODE: REAL-TIME FULL PROCESSING (EVERY FRAME)")
+    disp = display.Display()
+    cam = camera.Camera(config.CAM_WIDTH, config.CAM_HEIGHT)
+    try:
+        cam.set_brightness(-1)
+        cam.set_contrast(1)
+    except Exception:
+        pass
 
-    network_mode = resolve_network_mode()
-    print(f"🌐 NETWORK_MODE = {network_mode}")
-
-    # Chỉ khi mode = wifi mới auto connect wlan0.
-    if network_mode == "wifi":
-        connect_wifi_linux(config.WIFI_SSID, config.WIFI_PASS)
-    else:
-        print("🔌 LAN mode: bỏ qua bước auto-connect Wi-Fi.")
-    
-    # Dùng font mặc định (nhanh nhất)
-    image.set_default_font("sourcehansans")
-
-    cam_mgr = CameraManager(config.CAM_WIDTH, config.CAM_HEIGHT)
-    disp = display.Display() # [FIX] Khởi tạo đối tượng Display
-    
-    # [UPDATE] Khởi tạo StreamServer để hỗ trợ Web Dashboard
-    streamer = StreamServer(config.HOST, config.PORT, config.TIMEOUT)
-    # [NEW] Khởi tạo Server tin nhắn (Port 8888)
-    msg_server = MessageServer(8888)
-    
-    # [NEW] Khởi tạo Client gửi dữ liệu sang Tinkerboard
-    tinker_client = None
-    if config.ENABLE_TINKER:
-        tinker_ip = get_tinker_ip_by_mode(network_mode)
-        print(f"🔗 Tinker target: {tinker_ip}:{config.TINKER_PORT}")
-        tinker_client = TinkerClient(tinker_ip, config.TINKER_PORT)
-    
-    ai_engine = AIEngine(config.MODEL_PATH, config.CONF_THRESHOLD)
-    hud = HUD(config.CAM_WIDTH, config.CAM_HEIGHT)
+    # [FIX] AIEngine của Du_An_Maix_V2 không nhận iou_threshold trong init (nó tự động adaptive)
+    engine = AIEngine(config.MODEL_PATH, conf_threshold=config.CONF_THRESHOLD)
     tracker = ObjectTracker()
-    
-    cam_mgr.start()
-    streamer.start() # [UPDATE] Bắt đầu lắng nghe kết nối Web
-    msg_server.start() # [NEW] Bắt đầu lắng nghe máy tính
-    
-    # [TEST PERFORMANCE] Chuyển sang chế độ xử lý toàn vẹn (Full AI)
-    # SKIP_FRAMES = 0 nghĩa là không bỏ frame nào, chạy AI liên tục
-    SKIP_FRAMES = 0
-    
-    if config.ENABLE_AI:
-        if not ai_engine.load():
-            config.ENABLE_AI = False
+    ui = HUD(config.CAM_WIDTH, config.CAM_HEIGHT)
+    iot_client = TinkerClient(host=config.TINKER_IP, port=config.TINKER_PORT)
 
-    frame_cnt = 0
+    # [FIX] Phải gọi load() để nạp model vào NPU.
+    if not engine.load():
+        print("❌ Không thể nạp model AI. Thoát chương trình.")
+        return
+
+    cpu_meter = CPUMeter()
+    npu_meter = NPUMeter()
+
+    fps_show = getattr(config, "FPS_LIMIT", 30)
     t_last = time.time()
-    fps_show = 25.0  
-    t_last = time.perf_counter()
-    current_results = [] # [INIT] Khởi tạo biến lưu kết quả
-    last_sent_msg = None # [NEW] Lưu tin nhắn cuối cùng đã gửi
-    
-    while True:
-        img = cam_mgr.get_frame()
+    t_last_stats = 0.0
+
+    print("🚀 Bắt đầu luồng xử lý chính...", flush=True)
+
+    while not app.need_exit():
+        t_frame_start = time.time()
+        img = cam.read()
         if img is None:
-            time.sleep(0.001)
             continue
-        
-        t_now = time.perf_counter()
-        dt = t_now - t_last
+
+        current_time = time.time()
+
+        t_inf0 = time.time()
+        # [FIX] engine.process trả về tuple (img, results) trong Du_An_Maix_V2
+        _, raw_objs = engine.process(img)
+        infer_ms = (time.time() - t_inf0) * 1000.0
+
+        # [FIX] ObjectTracker của V2 nhận trực tiếp list dict từ AI, tự xử lý smoothing/gesture
+        processed_people = tracker.update(raw_objs)
+
+        # [FIX] Vẽ giao diện bằng HUD (đã bao gồm vẽ xương, box, và thông báo action)
+        ui.draw_ai_result(img, processed_people)
+
+        # [FIX] Gửi cảnh báo qua IoT (TinkerClient của V2 dùng send_pose)
+        if getattr(config, "ENABLE_TINKER", False):
+            iot_client.send_pose(processed_people)
+
+        dt = current_time - t_last
         if dt > 0:
             fps_show = (fps_show * 0.9) + ((1.0 / dt) * 0.1)
-        t_last = t_now
-        if config.ENABLE_AI:
-            # [FULL PROCESSING] Chạy AI trên mọi khung hình
-            # Loại bỏ hoàn toàn logic dự đoán (Hybrid) để đảm bảo dữ liệu thực tế nhất
-            if frame_cnt % (SKIP_FRAMES + 1) == 0:
-                _, ai_results = ai_engine.process(img)
-                current_results = tracker.update(ai_results)
-                
-                # [NEW] Gửi dữ liệu Pose sang Tinkerboard
-                if config.ENABLE_TINKER and tinker_client:
-                    tinker_client.send_pose(current_results)
+        t_last = current_time
+        ui.draw_fps(img, fps_show)
 
-        hud.draw_fps(img, fps_show)
-        if config.ENABLE_AI:
-            hud.draw_ai_result(img, current_results)
+        frame_ms = (time.time() - t_frame_start) * 1000.0
+        # [OPTIMIZE] NPU cần update liên tục mỗi frame để bộ lọc làm mượt (EMA) hoạt động đúng
+        npu_pct = npu_meter.update(frame_ms, infer_ms)
 
-        # [UPDATE] Xử lý Web Stream (Non-blocking)
-        streamer.check_new_client()      # Kiểm tra xem có ai vào Web không
-        streamer.send_frame(img, config.JPEG_QUALITY) # Gửi ảnh (nếu có người xem)
-
-        # [NEW] Xử lý gửi tin nhắn qua mạng
-        msg_server.check_client() # Chấp nhận kết nối từ PC
-        # Kiểm tra nếu HUD có thông báo mới thì gửi đi
-        if hud.last_action_msg != last_sent_msg:
-            msg_server.send(hud.last_action_msg)
+        if (current_time - t_last_stats) >= 1.5:
+            # [OPTIMIZE] Chỉ đọc CPU/RAM mỗi 1.5s. 
+            # Giúp tính được mức trung bình trong 1.5s qua -> Số liệu ổn định, chính xác hơn.
+            cpu_pct = cpu_meter.read_percent()
+            ram_used, ram_total, ram_pct = read_ram()
             
-            # [CAPTURE] Nếu là cảnh báo thật (không phải None), chụp và gửi ảnh ngay
-            if hud.last_action_msg is not None:
-                msg_server.send_image(img)
-                
-            last_sent_msg = hud.last_action_msg
+            if not getattr(config, "ENABLE_TINKER", False):
+                print(
+                    f"CPU {cpu_pct:5.1f}% | "
+                    f"RAM {ram_used:5.1f}/{ram_total:5.1f} MB ({ram_pct:4.1f}%) | "
+                    f"NPU {npu_pct:5.1f}% | "
+                    f"INF {infer_ms:5.1f} ms | "
+                    f"FPS {fps_show:4.1f} | "
+                    f"POSE {len(processed_people)}",
+                    flush=True,
+                )
+            t_last_stats = current_time
 
-        # [NEW] Xử lý Lệnh từ Serial (PC gửi xuống)
-        # Kiểm tra xem có dữ liệu ở cổng stdin không (timeout=0 để không chặn)
-        if select.select([sys.stdin], [], [], 0)[0]:
-            cmd = sys.stdin.readline().strip()
-            if cmd:
-                print(f"💻 PC Command: {cmd}") # Phản hồi lại để PC biết đã nhận
-                
-                # Xử lý lệnh
-                if cmd == 'q':
-                    print("🛑 Received Quit Command.")
-                    break
-                elif cmd == 'd': # Debug toggle
-                    config.ENABLE_AI = not config.ENABLE_AI
-                    print(f"🔧 AI Enabled: {config.ENABLE_AI}")
+        disp.show(img)
 
-        # [MAIXVISION] Hiển thị trực tiếp
-        disp.show(img) # [FIX] Dùng đối tượng disp để hiển thị
-        
-        frame_cnt += 1
-        
-        # [SMART GC] Quản lý bộ nhớ thông minh (Thay thế cho gc.collect() mỗi 30 frame)
-        # 1. Trigger Khẩn cấp: Tránh Out of Memory (Nếu có psutil)
-        if HAS_PSUTIL and frame_cnt % 30 == 0:
-            mem_usage = psutil.virtual_memory().percent
-            if mem_usage > 85.0: # Nếu RAM bị ăn hơn 85%
-                print(f"⚠️ CẢNH BÁO RAM ({mem_usage}%). Ép dọn rác khẩn cấp!")
-                gc.collect()
-        
-        # 2. Trigger Định kỳ nhưng kéo giãn thời gian (15 giây 1 lần thay vì 1.5 giây)
-        elif frame_cnt % 300 == 0:
-            gc.collect()
 
 if __name__ == "__main__":
-    try: main()
-    except KeyboardInterrupt: print("\n🛑 Stop.")
+    main()

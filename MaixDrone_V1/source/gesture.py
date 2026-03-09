@@ -166,7 +166,7 @@ class PoseEstimator:
 
             a_vuong = in_range(a, 70 - angle_margin, 100 + angle_margin)
             b_vuong = in_range(b, 60 - angle_margin, 100 + angle_margin)
-            b_ngang = in_range(b, 140 - angle_margin, 180)
+            b_ngang = in_range(b, 125 - angle_margin, 180) # [UPDATE] 140 -> 125: Mở rộng góc nhận diện ngang
             c_cao = in_range(c, 140 - angle_margin, 180)
             a_cao_vuong = in_range(a, 140 - angle_margin, 180)
             b_cao_vuong = in_range(b, 75 - angle_margin, 90 + angle_margin)

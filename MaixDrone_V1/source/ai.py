@@ -238,34 +238,70 @@ class AIEngine:
         try:
             # --- GIAI ĐOẠN 1: TÌM NGƯỜI (GLOBAL DETECTION) ---
             
-            # [PERFORMANCE] FAST RESIZE STRATEGY (Thay thế Letterbox)
-            # Thay vì tạo ảnh nền đen và padding (tốn RAM/CPU), ta resize thẳng.
-            # Chấp nhận méo hình dọc nhẹ (~6%) để đổi lấy tốc độ.
+            scale_x = 1.0
+            scale_y = 1.0
+            pad_w = 0
+            pad_h = 0
             
-            # 1. Resize ảnh đầu vào (nếu cần)
-            if img_hd.width() != self.input_w or img_hd.height() != self.input_h:
-                img_input = img_hd.resize(self.input_w, self.input_h)
+            # [MAX ACCURACY] LETTERBOX MODE
+            if getattr(config, "AI_LETTERBOX_MODE", False):
+                img_w = img_hd.width()
+                img_h = img_hd.height()
+                
+                # 1. Tính tỷ lệ scale giữ nguyên aspect ratio (r)
+                r = min(self.input_w / img_w, self.input_h / img_h)
+                new_unpad_w = int(img_w * r)
+                new_unpad_h = int(img_h * r)
+                
+                # 2. Resize ảnh gốc về kích thước mới (vẫn giữ tỷ lệ)
+                img_resized = img_hd.resize(new_unpad_w, new_unpad_h)
+                
+                # 3. Tạo ảnh nền xám (padding)
+                img_input = image.Image(self.input_w, self.input_h, image.Format.FMT_RGB888)
+                img_input.draw_rect(0, 0, self.input_w, self.input_h, image.Color(114, 114, 114), -1)
+                
+                # 4. Dán ảnh đã resize vào giữa (Dùng CPU copy memory)
+                pad_w = (self.input_w - new_unpad_w) // 2
+                pad_h = (self.input_h - new_unpad_h) // 2
+                # [FIX] draw_image(x, y, img) - Đúng chuẩn MaixPy
+                img_input.draw_image(pad_w, pad_h, img_resized)
+                
+                # Lưu thông số để map ngược
+                scale_x = r
+                scale_y = r
+                
+                if self.first_run:
+                    print(f"🚀 [MAX ACCURACY] Letterbox ON: Scale={r:.3f}, Pad=({pad_w},{pad_h})")
+                    self.first_run = False
             else:
-                img_input = img_hd
-
-            # 2. Tính tỷ lệ hồi quy (Mapping Scale)
-            # Dùng để map toạ độ từ Model (320x224) ngược về Camera (320x240)
-            scale_x = img_hd.width() / self.input_w
-            scale_y = img_hd.height() / self.input_h
-
-            if self.first_run:
-                print(f"🚀 [PERFORMANCE MODE] Direct Resize Activated: {scale_x:.2f}x{scale_y:.2f}")
-                self.first_run = False
+                # [PERFORMANCE] FAST RESIZE (Méo hình nhẹ)
+                if img_hd.width() != self.input_w or img_hd.height() != self.input_h:
+                    img_input = img_hd.resize(self.input_w, self.input_h)
+                else:
+                    img_input = img_hd
+                scale_x = img_hd.width() / self.input_w
+                scale_y = img_hd.height() / self.input_h
+                
+                if self.first_run:
+                    print(f"🚀 [PERFORMANCE] Fast Resize ON: {scale_x:.2f}x{scale_y:.2f}")
+                    self.first_run = False
 
             # [ADAPTIVE DETECT] conf_th/iou_th thay doi theo khoang cach uoc luong.
             objs = self._detect_with_adaptive_thresholds(img_input)
             
             for obj in objs:
-                # Map Box gốc từ YOLO (Nhân với scale thay vì chia ratio)
-                bx = obj.x * scale_x
-                by = obj.y * scale_y
-                bw = obj.w * scale_x
-                bh = obj.h * scale_y
+                if getattr(config, "AI_LETTERBOX_MODE", False):
+                    # Map Box (Letterbox): (Val - Pad) / Scale
+                    bx = (obj.x - pad_w) / scale_x
+                    by = (obj.y - pad_h) / scale_y
+                    bw = obj.w / scale_x
+                    bh = obj.h / scale_y
+                else:
+                    # Map Box (Resize): Val * Scale
+                    bx = obj.x * scale_x
+                    by = obj.y * scale_y
+                    bw = obj.w * scale_x
+                    bh = obj.h * scale_y
 
                 # [PADDING ACCURACY-FIRST] Padding dong theo khoang cach + top-edge.
                 pad_w_ratio, pad_top_ratio, pad_bottom_ratio = self._get_bbox_padding()
@@ -292,13 +328,24 @@ class AIEngine:
 
                     for i in range(num_points):
                         base = i * stride
-                        px = obj.points[base] * scale_x
-                        py = obj.points[base+1] * scale_y
+                        # Map Points
+                        if getattr(config, "AI_LETTERBOX_MODE", False):
+                            px = (obj.points[base] - pad_w) / scale_x
+                            py = (obj.points[base+1] - pad_h) / scale_y
+                        else:
+                            px = obj.points[base] * scale_x
+                            py = obj.points[base+1] * scale_y
+                            
                         conf = obj.points[base+2] if stride == 3 else 1.0
 
                         # Kẹp biên ảnh trước khi xử lý tiếp để giảm outlier.
                         px = max(0.0, min(img_hd.width() - 1, px))
                         py = max(0.0, min(img_hd.height() - 1, py))
+
+                        # [NEW STRICT GHOST KILLER] Out-of-FOV Clamp Killer
+                        # Bất kỳ điểm nào bị ép chặt vào 2 pixel trên cùng của màn hình (do đứng gần bị lọt ra ngoài) -> Tiêu diệt (Ép conf = 0)!
+                        if py <= 2.0:
+                            conf = 0.0
 
                         # [CORNER TRAP SAFER] Không triệt khớp tay (7,8,9,10)
                         # để tránh co rút tay khi giơ cao chạm góc bbox.
@@ -333,9 +380,15 @@ class AIEngine:
                     if stride == 3 and mapped_points:
                         box_top = max(0.0, by)
                         box_h = max(1.0, bh)
-                        head_top_band = box_top + (box_h * float(getattr(config, "GHOST_HEAD_TOP_BAND_RATIO", 0.12)))
+                        
+                        # [DYNAMIC GHOST] Nếu đối tượng ở gần (Box to > 45% ảnh), mở rộng vùng quét ma
+                        base_ghost_ratio = float(getattr(config, "GHOST_HEAD_TOP_BAND_RATIO", 0.15))
+                        if box_h > img_hd.height() * 0.45: # [UPDATE] 0.60 -> 0.45: Kích hoạt sớm hơn
+                            base_ghost_ratio *= 2.0 # [UPDATE] 1.5 -> 2.0: Quét rộng gấp đôi vùng trên đầu
+                        
+                        head_top_band = box_top + (box_h * base_ghost_ratio)
                         body_top_band = box_top + (box_h * float(getattr(config, "GHOST_BODY_TOP_BAND_RATIO", 0.05)))
-                        head_conf_max = float(getattr(config, "GHOST_HEAD_CONF_MAX", 0.65))
+                        head_conf_max = float(getattr(config, "GHOST_HEAD_CONF_MAX", 0.80))
                         body_conf_max = float(getattr(config, "GHOST_BODY_CONF_MAX", 0.28))
                         iso_dist = max(4.0, box_h * float(getattr(config, "GHOST_HEAD_ISO_DIST_RATIO", 0.14)))
 
